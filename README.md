@@ -23,3 +23,8 @@ if that doesnt work you can specify a subnet to scan with reverse lookups using
 
 ## Setup
 `python3 -m pip install -r requirements.txt`
+
+## Docker
+`docker build . -t name thief:latest`
+
+`docker run thief:latest`
