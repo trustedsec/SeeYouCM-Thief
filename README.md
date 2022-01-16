@@ -1,7 +1,9 @@
-#Cisco Phone Thief
+# SeeYouCM Thief
+
 Simple tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials
 
-##Usage
+## Usage
+
 Sometimes the CUCM server supplys a list of hostnames. Without specifying a phone IP address the script will attempt to
 every config in the listing. 
 
@@ -19,5 +21,5 @@ if that doesnt work you can specify a subnet to scan with reverse lookups using
  
 `./thief.py --subnet <subnet to scan> [--verbose]`
 
-##Setup
+## Setup
 `python3 -m pip install -r requirements.txt`
