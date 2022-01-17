@@ -286,6 +286,8 @@ if __name__ == '__main__':
             quit(1)
         else:
             print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
+    elif args.host:
+        CUCM_host = args.host
     else:
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
