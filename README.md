@@ -5,7 +5,7 @@ Simple tool to automatically download and parse configuration files from Cisco p
 ## Usage
 
 Sometimes the CUCM server supplys a list of hostnames. Without specifying a phone IP address the script will attempt to
-every config in the listing. 
+download every config in the listing.
 
 `./thief.py -H <Cisco CUCM Server> [--verbose]`
 
