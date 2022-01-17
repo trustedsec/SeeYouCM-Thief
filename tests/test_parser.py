@@ -98,5 +98,3 @@ def test_8861_subnet():
     with open('tests/cisco-CP-8861.html') as html_file:
         assert parse_subnet(html_file.read()) == '255.255.0.0'
 
-def test_fail():
-    assert True == False
