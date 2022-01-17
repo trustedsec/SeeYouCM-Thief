@@ -77,7 +77,7 @@ def parse_cucm(html):
 
 def parse_subnet(html):
     html = html.replace('\n','').replace('\r','')
-    subnet_mask = re.search(r'Subnet Mask\ ?</B></TD>\r?\n?\ *(?:<td width="?20"?></TD>)?\r?\n?<TD><B>([12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9])</B>',html.strip(),re.IGNORECASE)
+    subnet_mask = re.search(r'Subnet Mask\ ?</B></TD>\r?\n?\ *(?:asdf<td width="?20"?></TD>)?\r?\n?<TD><B>([12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9]\.[12]?[0-9]?[0-9])</B>',html.strip(),re.IGNORECASE)
     if subnet_mask is None:
         return None
     else:
