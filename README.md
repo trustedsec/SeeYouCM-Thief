@@ -36,6 +36,9 @@ ___________
 
 Simple tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials
 
+## Blog 
+https://www.trustedsec.com/blog/seeyoucm-thief-exploiting-common-misconfigurations-in-cisco-phone-systems/
+
 ## Usage
 
 Sometimes the CUCM server supplys a list of hostnames. Without specifying a phone IP address the script will attempt to
