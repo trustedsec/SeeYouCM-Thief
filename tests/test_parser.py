@@ -105,4 +105,11 @@ def test_7811_cucm():
 def test_7811_subnet():
     with open('tests/cisco-CP-7811.html') as html_file:
         assert parse_subnet(html_file.read()) == '255.255.255.0'
+def test_7940G_cucm():
+    with open('tests/cisco-CP-7940G.html') as html_file:
+        assert parse_cucm(html_file.read()) == 'CUCM01.example.com'
+
+def test_7940G_subnet():
+    with open('tests/cisco-CP-7940G.html') as html_file:
+        assert parse_subnet(html_file.read()) == '255.255.255.0'
 

