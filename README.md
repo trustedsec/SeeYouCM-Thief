@@ -41,7 +41,7 @@ https://www.trustedsec.com/blog/seeyoucm-thief-exploiting-common-misconfiguratio
 
 ## Usage
 
-Sometimes the CUCM server supplys a list of hostnames. Without specifying a phone IP address the script will attempt to
+Sometimes the CUCM server supplies a list of hostnames. Without specifying a phone IP address the script will attempt to
 download every config in the listing.
 
 `./thief.py -H <Cisco CUCM Server> [--verbose]`
