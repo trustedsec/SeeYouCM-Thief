@@ -1,1 +1,3 @@
 requests
+bs4
+alive_progress
