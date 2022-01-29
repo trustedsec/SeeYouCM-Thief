@@ -211,6 +211,19 @@ def get_users_api(CUCM_host):
         print('CUCM Server {} is not responding'.format(CUCM_host))
     return usernames
 
+def get_version(CUCM_host):
+    base_url = f'https://{CUCM_host}:8443/cucm-uds/version'
+    try:
+        __http_response = requests.get(base_url, timeout=2,verify=False)
+        if __http_response.status_code != 404:
+            lines = __http_response.text
+            soup = BeautifulSoup(lines, 'lxml')
+            cucm_version = soup.findAll('version')[0].text
+            print(f'CUCM is running version {cucm_version}')
+    except requests.exceptions.ConnectionError:
+        print('CUCM Server {} is not responding'.format(CUCM_host))
+    return
+
 def search_for_secrets(CUCM_host,filename):
     global found_credentials
     global found_usernames
@@ -281,6 +294,8 @@ if __name__ == '__main__':
     found_usernames = []
     file_names = ''
     hostnames = []
+
+    get_version(CUCM_host)
 
     if enumsubnet:
         hosts = enumerate_phones_subnet(enumsubnet)
