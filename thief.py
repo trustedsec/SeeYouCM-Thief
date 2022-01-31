@@ -374,6 +374,7 @@ if __name__ == '__main__':
         api_users = get_users_api(CUCM_host)
         if api_users != []:
             print('The following users were identified from the UDS API')
-            sorted_unique_users = set(api_users.sort())
-            for username in sorted_unique_users:
+
+            unique_users = set(api_users)
+            for username in unique_users:
                 print('{0}'.format(username))
