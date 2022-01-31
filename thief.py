@@ -373,8 +373,13 @@ if __name__ == '__main__':
         #each API call is limited by default to 64 users per request
         api_users = get_users_api(CUCM_host)
         if api_users != []:
-            print('The following users were identified from the UDS API')
-
             unique_users = set(api_users)
-            for username in unique_users:
+            api_users = list(unique_users)
+            with open('./cucm_users.txt', mode='w') as outfile:
+                for line in api_users:
+                    outfile.writelines(line)
+            print(f'The following {len(api_users)} users were identified from the UDS API')
+
+            for username in api_users:
                 print('{0}'.format(username))
+
