@@ -34,7 +34,8 @@ ___________
 ```
 # SeeYouCM Thief
 
-Simple tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials
+Simple tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials. Will also optionally enumerate active directory users from the UDS API. 
+
 
 ## Blog 
 https://www.trustedsec.com/blog/seeyoucm-thief-exploiting-common-misconfigurations-in-cisco-phone-systems/
@@ -57,6 +58,11 @@ OR
 if that doesnt work you can specify a subnet to scan with reverse lookups using 
  
 `./thief.py --subnet <subnet to scan> [--verbose]`
+
+### User Enumeration
+To optionally enumerate Active Directory users from the UDS api on the CUCM add `--userenum` and it will automatically bruteforce through the API aa-zz to return a list of users.
+
+`./thief.py -H <CUCM server> --userenum`
 
 ## Setup
 `python3 -m pip install -r requirements.txt`
