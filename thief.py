@@ -277,7 +277,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Penetration Toolkit for attacking Cisco Phone Systems by stealing credentials from phone configuration files')
     parser.add_argument('-H','--host', default=None, type=str, help='IP Address of Cisco Unified Communications Manager')
-    parser.add_argument('--userenum', action='store_true', default=False, help='Enable user enumeration via UDS api')
+    parser.add_argument('--userenum', action='store_true', default=False, help='Enable user enumeration via UDS API')
     parser.add_argument('-p','--phone', type=str, help='IP Address of a Cisco Phone')
     parser.add_argument('-s','--subnet', type=str, help='IP Address of a Cisco Phone')
     parser.add_argument('-v','--verbose', action='store_true', default=False, help='Enable Verbose Logging')
