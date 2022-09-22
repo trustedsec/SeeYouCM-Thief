@@ -206,7 +206,7 @@ def get_users_api(CUCM_host):
                         lines = __http_response.text
                         soup = BeautifulSoup(lines, 'lxml')
                         for user in soup.find_all('username'):
-                            usernames.append(user.text)
+                            usernames.append(user.text + "\n")
     except requests.exceptions.ConnectionError:
         print('CUCM Server {} is not responding'.format(CUCM_host))
     return usernames
