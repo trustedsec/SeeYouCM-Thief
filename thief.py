@@ -8,6 +8,7 @@ import string
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
 import tftpy
+import os
 
 requests.packages.urllib3.disable_warnings()
 
@@ -206,7 +207,7 @@ def get_config_names(CUCM_host, TFTP_hosts, hostnames=None, tftp=False):
                 for tftp_host in TFTP_hosts:
                     get_file_tftp(tftp_host, "ConfigFileCacheList.txt", tftp_host+"-ConfigFileCacheList.txt")
                     lines += open(tftp_host+"-ConfigFileCacheList.txt").readlines()
-                print(len(lines))
+                    os.remove(tftp_host+"-ConfigFileCacheList.txt")
             else:
                 url = "http://{0}:6970/ConfigFileCacheList.txt".format(CUCM_host)
                 __http_response = requests.get(url, timeout=2)
@@ -276,6 +277,7 @@ def search_for_secrets(CUCM_host, TFTP_hosts, filename, tftp=False):
             for tftp_host in TFTP_hosts:
                 get_file_tftp(tftp_host, filename, tftp_host+"-"+filename)
                 lines += open(tftp_host+"-"+filename).readlines()
+                os.remove(tftp_host+"-"+filename)
         else: 
             url = "http://{0}:6970/{1}".format(CUCM_host,
                                             filename)
