@@ -1,5 +1,8 @@
 # SeeYouCM Thief
 
+![Tests](https://github.com/trustedsec/SeeYouCM-Thief/actions/workflows/pytest.yaml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.x-blue)
+
 Multi-threaded tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials. Features intelligent caching, automatic backoff protection, and MAC address brute forcing capabilities.
 
 ## Features
