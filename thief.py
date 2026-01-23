@@ -1274,9 +1274,8 @@ if __name__ == '__main__':
         # ============================================================================
         
         # Process all candidates with multi-threading
-        db_file = globals().get('db_file', 'thief.db')
-        no_db = globals().get('no_db', False)
-        force_download = globals().get('force_download', False)
+        # Use the args values that were set earlier (no need for globals().get since they're in scope)
+        # db_file, no_db, and force_download are already defined above
         
         print(f'Starting multi-threaded brute force with 40 workers...')
         
