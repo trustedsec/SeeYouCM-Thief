@@ -1,0 +1,8 @@
+*.db
+*.db-journal
+*.sqlite
+*.csv
+.venv/
+.vscode/
+__pycache__/
+
