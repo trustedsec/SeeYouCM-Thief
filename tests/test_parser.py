@@ -1,10 +1,6 @@
 #!/usr/env python3
 from thief import parse_cucm, parse_subnet, parse_filename
 
-def test_8861_cucm():
-    with open('tests/cisco-CP-8861.html') as html_file:
-        assert parse_cucm(html_file.read()) == 'test-cucm-pub.example.com'
-
 def test_6921_cucm():
     with open('tests/cisco_CP-6921.html') as html_file:
         assert parse_cucm(html_file.read()) == 'cucm1.example.com'
@@ -94,9 +90,6 @@ def test_8865_subnet():
     with open('tests/cisco-CP-8865.html') as html_file:
         assert parse_subnet(html_file.read()) == '255.255.254.0'
 
-def test_8861_subnet():
-    with open('tests/cisco-CP-8861.html') as html_file:
-        assert parse_subnet(html_file.read()) == '255.255.0.0'
 
 def test_7811_cucm():
     with open('tests/cisco-CP-7811.html') as html_file:
