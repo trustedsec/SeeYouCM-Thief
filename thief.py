@@ -799,6 +799,19 @@ def init_database(db_file='thief.db'):
         )
     ''')
     
+    # Create table for discovered MAC prefixes
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mac_prefixes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            phone_ip TEXT NOT NULL,
+            full_mac TEXT NOT NULL,
+            partial_mac TEXT NOT NULL,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(cucm_host, full_mac)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
     return db_file
@@ -902,6 +915,62 @@ def log_credentials_to_db(cucm_host, credentials, usernames, db_file='thief.db')
     except Exception as e:
         return False
 
+def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
+    """
+    Log UDS API enumerated usernames to database
+    
+    Args:
+        cucm_host: CUCM server hostname/IP
+        usernames: List of usernames from UDS API
+        db_file: Database file path
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Log usernames from UDS API (device = 'UDS_API')
+        for username in usernames:
+            cursor.execute('''
+                INSERT INTO usernames (cucm_host, device, username, discovery_time)
+                VALUES (?, ?, ?, ?)
+            ''', (cucm_host, 'UDS_API', username, timestamp))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f'[-] Error logging UDS usernames to database: {e}')
+        return False
+
+def log_mac_prefix_to_db(cucm_host, phone_ip, full_mac, partial_mac, db_file='thief.db'):
+    """
+    Log discovered MAC prefix to database
+    
+    Args:
+        cucm_host: CUCM server hostname/IP
+        phone_ip: Phone IP address where MAC was discovered
+        full_mac: Full 12-character MAC address
+        partial_mac: Partial 9-character MAC prefix
+        db_file: Database file path
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Use INSERT OR IGNORE to skip duplicates
+        cursor.execute('''
+            INSERT OR IGNORE INTO mac_prefixes (cucm_host, phone_ip, full_mac, partial_mac, discovery_time)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (cucm_host, phone_ip, full_mac, partial_mac, timestamp))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        return False
+
 def display_database_summary(db_file='thief.db', cucm_filter=None):
     """
     Display credentials discovery summary from database
@@ -953,6 +1022,29 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         
         usernames = cursor.fetchall()
         
+        # Get MAC prefixes (gracefully handle missing table for older databases)
+        mac_prefixes = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, phone_ip, full_mac, partial_mac, discovery_time 
+                    FROM mac_prefixes 
+                    WHERE cucm_host = ?
+                    ORDER BY discovery_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, phone_ip, full_mac, partial_mac, discovery_time 
+                    FROM mac_prefixes 
+                    ORDER BY discovery_time DESC
+                ''')
+            
+            mac_prefixes = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            # Table doesn't exist in older databases - that's fine
+            if 'no such table' not in str(e):
+                raise
+        
         # Get download stats
         if cucm_filter:
             cursor.execute('''
@@ -972,15 +1064,15 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         
         conn.close()
         
-        if not credentials and not usernames:
-            print(f'\n[-] No credentials or usernames found in database')
+        if not credentials and not usernames and not mac_prefixes:
+            print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
             return
         
         # Display summary
         print(f'\n\n{"="*70}')
-        print(f'{"DATABASE CREDENTIALS SUMMARY":^70}')
+        print(f'{"DATABASE SUMMARY":^70}')
         if cucm_filter:
             print(f'{f"Filter: {cucm_filter}":^70}')
         print("="*70)
@@ -1026,10 +1118,35 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
                 for username, timestamp in devices_with_users[device]:
                     print(f'{device:<20} {username:<20}')
         
+        if mac_prefixes:
+            # Group by CUCM host
+            cucm_macs = {}
+            for cucm, phone_ip, full_mac, partial_mac, timestamp in mac_prefixes:
+                if cucm not in cucm_macs:
+                    cucm_macs[cucm] = []
+                cucm_macs[cucm].append((phone_ip, full_mac, partial_mac, timestamp))
+            
+            print(f'\n\033[1m[+] MAC PREFIXES DISCOVERED ({len(mac_prefixes)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Phone IP":<18} {"Full MAC":<15} {"Prefix (9 char)":<15} {"CUCM Host":<20}')
+            print("-"*70)
+            for cucm in sorted(cucm_macs.keys()):
+                for phone_ip, full_mac, partial_mac, timestamp in cucm_macs[cucm]:
+                    print(f'{phone_ip:<18} {full_mac:<15} {partial_mac:<15} {cucm:<20}')
+            
+            # Display unique prefix list for easy reference
+            unique_prefixes = sorted(set(p[3] for p in mac_prefixes))
+            print(f'\n\033[1mUnique MAC Prefixes for Brute Force ({len(unique_prefixes)} unique):\033[0m')
+            print(f'  {", ".join(unique_prefixes)}')
+        
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
         print(f'  • Total download attempts:      {total_attempts}')
         print(f'  • Successful downloads:         {successful_downloads}')
+        if mac_prefixes:
+            print(f'  • MAC prefixes discovered:      {len(mac_prefixes)}')
+            unique_prefixes = len(set(p[3] for p in mac_prefixes))
+            print(f'  • Unique MAC prefixes:          {unique_prefixes}')
         if credentials:
             print(f'  • Devices with credentials:     {len(devices_with_creds)}')
         if usernames:
@@ -1228,6 +1345,10 @@ if __name__ == '__main__':
                         all_found_macs.add(partial_mac)
                         mac_to_cucm[partial_mac] = phone_cucm
                         successful_detections += 1
+                        
+                        # Log MAC prefix to database unless --no-db is set
+                        if not no_db:
+                            log_mac_prefix_to_db(phone_cucm, phone, full_mac, partial_mac, db_file)
                     else:
                         print(f'  ✗ Could not extract MAC from hostname: {hostname}')
                         print(f'  → Skipping this phone, continuing with others...\n')
@@ -1637,10 +1758,21 @@ if __name__ == '__main__':
         if api_users != []:
             unique_users = set(api_users)
             api_users = list(unique_users)
+            
+            # Write to output file
             with open(outfile, mode='w') as outputfile:
                 for line in api_users:
                     outputfile.write(line+'\n')
+            
+            # Log to database unless --no-db flag is set
+            if not no_db:
+                if log_uds_usernames_to_db(CUCM_host, api_users, db_file):
+                    print(f'[+] Logged {len(api_users)} UDS API usernames to database')
+                else:
+                    print(f'[-] Failed to log UDS API usernames to database')
+            
             print(f'The following {len(api_users)} users were identified from the UDS API')
+            print(f'[*] Usernames written to: {outfile}')
             if debug:
                 for username in api_users:
                     print('{0}'.format(username))
