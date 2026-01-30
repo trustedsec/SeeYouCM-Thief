@@ -274,8 +274,8 @@ def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
         return False
 
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
-    # Debug: print the filename being processed
-    print(f'[DEBUG] Processing config file: {filename}')
+    if debug:
+        print(f'[DEBUG] Processing config file: {filename}')
     credentials = []
     usernames = []
     lines = download_config_tftp(CUCM_host, filename) if use_tftp else download_config_http(CUCM_host, filename)
@@ -284,8 +284,8 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
             print('Unable to download config file: {0}'.format(filename))
         return credentials, usernames
 
-    # Debug: print the raw config file contents
-    print(f'[DEBUG] Config file contents for {filename}:\n{lines[:1000]}')
+    if debug:
+        print(f'[DEBUG] Config file contents for {filename}:\n{lines[:1000]}')
 
     user = password = user2 = None
     for line in lines.split('\n'):
@@ -303,9 +303,9 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
             if match.group(5):
                 user2 = match.group(5)
                 credentials.append(('unknown', password, filename))
-    # Debug: print parsed credentials and usernames
-    print(f'[DEBUG] Parsed credentials: {credentials}')
-    print(f'[DEBUG] Parsed usernames: {usernames}')
+    if debug:
+        print(f'[DEBUG] Parsed credentials: {credentials}')
+        print(f'[DEBUG] Parsed usernames: {usernames}')
     if debug:
         if user and password:
             print('{0}\t{1}\t{2}'.format(filename, user, password))
@@ -1313,6 +1313,8 @@ if __name__ == '__main__':
     elif phones:
         # Process multiple phones
         for phone in phones:
+            found_credentials.clear()
+            found_usernames.clear()
             print(f'\nProcessing phone: {phone}')
             
             if args.host is None:
@@ -1337,26 +1339,26 @@ if __name__ == '__main__':
                 continue
             
             # Search for secrets
-            all_credentials = []
-            all_usernames = []
             for file in file_names:
                 creds, users = search_for_secrets(CUCM_host, file, use_tftp)
-                all_credentials.extend(creds)
-                all_usernames.extend(users)
+                if creds:
+                    found_credentials.extend(creds)
+                if users:
+                    found_usernames.extend(users)
             
             # Display results for this phone
-            if all_credentials:
+            if found_credentials != []:
                 print('Credentials Found in Configurations!')
-                for cred in all_credentials:
+                for cred in found_credentials:
                     print('{0}\t{1}\t{2}'.format(cred[0],cred[1],cred[2]))
             
-            if all_usernames:
+            if found_usernames != []:
                 print('Usernames Found in Configurations!')
-                for usernames in all_usernames:
+                for usernames in found_usernames:
                     print('{0}\t{1}'.format(usernames[0],usernames[1]))
 
-            if not no_db and (all_credentials or all_usernames):
-                log_credentials_to_db(CUCM_host, all_credentials, all_usernames, db_file)
+            if not no_db and (found_credentials or found_usernames):
+                log_credentials_to_db(CUCM_host, found_credentials, found_usernames, db_file)
         
         quit(0)
     elif args.host:
@@ -1399,9 +1401,11 @@ if __name__ == '__main__':
 
         # Always write to database unless --no-db is set
         if not no_db and (all_credentials or all_usernames):
-            print(f'[DEBUG] Writing to DB: CUCM_host={CUCM_host}, credentials={all_credentials}, usernames={all_usernames}, db_file={db_file}')
+            if debug:
+                print(f'[DEBUG] Writing to DB: CUCM_host={CUCM_host}, credentials={all_credentials}, usernames={all_usernames}, db_file={db_file}')
             result = log_credentials_to_db(CUCM_host, all_credentials, all_usernames, db_file)
-            print(f'[DEBUG] log_credentials_to_db returned: {result}')
+            if debug:
+                print(f'[DEBUG] log_credentials_to_db returned: {result}')
         quit(0)
     if args.userenum:
         print('Getting users from UDS API.')
