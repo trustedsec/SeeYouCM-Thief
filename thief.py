@@ -774,12 +774,24 @@ def log_phone_cucm_to_db(cucm_host, phone_ip, db_file='thief.db'):
     """
     Log CUCM server mapping for a discovered phone.
     """
+    import re
     try:
+        # Normalize phone_ip to SEP+12 format if it matches
+        match = re.match(r'^(SEP.{12})', phone_ip, re.IGNORECASE)
+        if match:
+            normalized_phone = match.group(1).upper()
+        else:
+            normalized_phone = phone_ip
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Check for existing entry with normalized SEP+12 phone
+        cursor.execute('''SELECT 1 FROM phone_cucm WHERE cucm_host = ? AND phone_ip LIKE ?''', (cucm_host, normalized_phone+'%'))
+        if cursor.fetchone():
+            conn.close()
+            return False
         cursor.execute('''
-            INSERT OR IGNORE INTO phone_cucm (cucm_host, phone_ip, discovery_time)
+            INSERT INTO phone_cucm (cucm_host, phone_ip, discovery_time)
             VALUES (?, ?, ?)
         ''', (cucm_host, phone_ip, timestamp))
         conn.commit()
