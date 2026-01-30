@@ -385,7 +385,8 @@ def get_config_names(cucm_host, hostnames=None):
         for host in hostnames:
             if not host:
                 continue
-            name = host.strip()
+            # Always use only the base hostname (strip domain if present)
+            name = host.strip().split('.')[0]
             if not name:
                 continue
             if name.lower().endswith('.cnf.xml'):
@@ -1188,7 +1189,13 @@ if __name__ == '__main__':
                     mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
                     if mac_match:
                         full_mac = mac_match.group(1).upper()
-                        partial_mac = full_mac[:9]
+                        # Calculate prefix length so that prefix+suffix = 12
+                        prefix_len = 12 - brute_mac_len
+                        if prefix_len < 0:
+                            print(f'  ✗ Invalid brute_mac_len: {brute_mac_len} (must be <= 12)')
+                            failed_detections += 1
+                            continue
+                        partial_mac = full_mac[:prefix_len]
                         print(f'  ✓ Detected: SEP{full_mac}')
                         
                         # Detect CUCM for this specific phone
@@ -1246,7 +1253,10 @@ if __name__ == '__main__':
                 candidates_by_cucm[phone_cucm] = []
             for i in range(max_variations):
                 suffix = f'{i:0{brute_mac_len}X}'
-                full_mac = partial_mac + suffix
+                # Pad suffix with leading zeros if needed
+                suffix = suffix.zfill(brute_mac_len)
+                # Always ensure full_mac is 12 characters
+                full_mac = (partial_mac + suffix)[:12]
                 filename = f'SEP{full_mac}.cnf.xml'
                 candidates_by_cucm[phone_cucm].append((phone_cucm, full_mac, filename))
 
