@@ -1614,57 +1614,98 @@ if __name__ == '__main__':
             print("\n")
         quit(0)
     elif phones:
-        # Process multiple phones
-        for phone in phones:
-            found_credentials.clear()
-            found_usernames.clear()
-            print(f'\nProcessing phone: {phone}')
-            
+        print_lock = threading.Lock()
+
+        def _safe_print(message):
+            with print_lock:
+                print(message)
+
+        def process_phone(phone):
+            local_credentials = []
+            local_usernames = []
+            _safe_print(f'\nProcessing phone: {phone}')
+
             if args.host is None:
-                CUCM_host = get_cucm_name_from_phone(phone)
+                phone_cucm = get_cucm_name_from_phone(phone)
             else:
-                CUCM_host = args.host
-            
-            if CUCM_host is None:
-                print('Unable to automatically detect the CUCM Server for {phone}. Skipping...')
-                continue
-            else:
-                print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
-                if not no_db:
-                    log_phone_cucm_to_db(CUCM_host, phone, db_file)
-            
+                phone_cucm = args.host
+
+            if phone_cucm is None:
+                _safe_print('Unable to automatically detect the CUCM Server for {phone}. Skipping...')
+                return
+
+            _safe_print('The detected IP address/hostname for the CUCM server is {}'.format(phone_cucm))
+            if not no_db:
+                log_phone_cucm_to_db(phone_cucm, phone, db_file)
+
             # Get hostnames for this phone
             hostnames = [get_hostname_from_phone(phone)]
             hostnames += get_phones_hostnames_from_reverse(phone) or []
-            
+
             # Get config files
-            file_names = get_config_names(CUCM_host, hostnames=hostnames)
+            file_names = get_config_names(phone_cucm, hostnames=hostnames)
             if file_names is None:
-                print('Unable to detect file names from CUCM for {}'.format(phone))
-                continue
-            
+                _safe_print('Unable to detect file names from CUCM for {}'.format(phone))
+                return
+
             # Search for secrets
             for file in file_names:
-                creds, users = search_for_secrets(CUCM_host, file, use_tftp)
+                creds, users = search_for_secrets(phone_cucm, file, use_tftp)
                 if creds:
-                    found_credentials.extend(creds)
+                    local_credentials.extend(creds)
                 if users:
-                    found_usernames.extend(users)
-            
-            # Display results for this phone
-            if found_credentials != []:
-                print('Credentials Found in Configurations!')
-                for cred in found_credentials:
-                    print('{0}\t{1}\t{2}'.format(cred[0],cred[1],cred[2]))
-            
-            if found_usernames != []:
-                print('Usernames Found in Configurations!')
-                for usernames in found_usernames:
-                    print('{0}\t{1}'.format(usernames[0],usernames[1]))
+                    local_usernames.extend(users)
 
-            if not no_db and (found_credentials or found_usernames):
-                log_credentials_to_db(CUCM_host, found_credentials, found_usernames, db_file)
-        
+            # Display results for this phone
+            if local_credentials:
+                _safe_print('Credentials Found in Configurations!')
+                for cred in local_credentials:
+                    _safe_print('{0}\t{1}\t{2}'.format(cred[0], cred[1], cred[2]))
+
+            if local_usernames:
+                _safe_print('Usernames Found in Configurations!')
+                for usernames in local_usernames:
+                    _safe_print('{0}\t{1}'.format(usernames[0], usernames[1]))
+
+            if not no_db and (local_credentials or local_usernames):
+                log_credentials_to_db(phone_cucm, local_credentials, local_usernames, db_file)
+
+        num_workers = min(threads, len(phones)) if threads else 1
+        if num_workers < 1:
+            print('Threads must be at least 1')
+            quit(1)
+
+        if num_workers == 1:
+            for phone in phones:
+                process_phone(phone)
+            quit(0)
+
+        phone_queue = queue.Queue()
+
+        def phone_worker():
+            while True:
+                phone = phone_queue.get()
+                if phone is None:
+                    phone_queue.task_done()
+                    break
+                process_phone(phone)
+                phone_queue.task_done()
+
+        workers = []
+        for i in range(num_workers):
+            t = threading.Thread(target=phone_worker, daemon=True, name=f'PhoneWorker-{i}')
+            t.start()
+            workers.append(t)
+
+        for phone in phones:
+            phone_queue.put(phone)
+
+        phone_queue.join()
+        for _ in range(num_workers):
+            phone_queue.put(None)
+        for t in workers:
+            t.join()
+
         quit(0)
     elif args.host:
         CUCM_host = args.host
