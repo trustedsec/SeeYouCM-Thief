@@ -187,6 +187,20 @@ def download_config_tftp(cucm_host, filename, timeout=5):
             pass
 
 
+def configure_tftpy_logging(debug_enabled):
+    if debug_enabled:
+        logging.getLogger('tftpy.TftpClient').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy.TftpContexts').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.DEBUG)
+        logging.getLogger('tftpy').setLevel(logging.DEBUG)
+    else:
+        # Silence noisy TFTP warnings unless --debug is enabled
+        logging.getLogger('tftpy.TftpClient').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy.TftpContexts').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.CRITICAL)
+        logging.getLogger('tftpy').setLevel(logging.CRITICAL)
+
+
 class TFTPBackoffManager:
     """Manages TFTP request rate with automatic backoff on errors."""
 
@@ -1044,17 +1058,7 @@ if __name__ == '__main__':
         init_database(db_file)
     
     # Enable tftpy logging only in debug mode
-    if debug:
-        logging.getLogger('tftpy.TftpClient').setLevel(logging.DEBUG)
-        logging.getLogger('tftpy.TftpContexts').setLevel(logging.DEBUG)
-        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.DEBUG)
-        logging.getLogger('tftpy').setLevel(logging.DEBUG)
-    else:
-        # Silence noisy TFTP warnings unless --debug is enabled
-        logging.getLogger('tftpy.TftpClient').setLevel(logging.CRITICAL)
-        logging.getLogger('tftpy.TftpContexts').setLevel(logging.CRITICAL)
-        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.CRITICAL)
-        logging.getLogger('tftpy').setLevel(logging.CRITICAL)
+    configure_tftpy_logging(debug)
 
     get_version(CUCM_host)
 
