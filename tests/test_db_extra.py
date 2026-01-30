@@ -54,6 +54,22 @@ def test_log_mac_prefix_to_db(tmp_path):
     assert row[1] == phone_ip
     assert row[2] == full_mac
     assert row[3] == partial_mac
+
+
+def test_log_phone_cucm_to_db(tmp_path):
+    db_path = tmp_path / 'test.db'
+    thief.init_database(str(db_path))
+    cucm_host = "1.2.3.4"
+    phone_ip = "10.0.0.5"
+    assert thief.log_phone_cucm_to_db(cucm_host, phone_ip, str(db_path)) is True
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT cucm_host, phone_ip FROM phone_cucm")
+    row = cursor.fetchone()
+    conn.close()
+    assert row[0] == cucm_host
+    assert row[1] == phone_ip
     # Always dump DB for verification
     dump_db(str(db_path))
     conn.close()

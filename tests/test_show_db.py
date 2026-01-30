@@ -37,6 +37,13 @@ def setup_test_db():
         discovery_time TEXT NOT NULL,
         UNIQUE(cucm_host, full_mac)
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS phone_cucm (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cucm_host TEXT NOT NULL,
+        phone_ip TEXT NOT NULL,
+        discovery_time TEXT NOT NULL,
+        UNIQUE(cucm_host, phone_ip)
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS download_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cucm_host TEXT NOT NULL,

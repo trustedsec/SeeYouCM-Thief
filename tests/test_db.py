@@ -12,7 +12,7 @@ def test_init_database(tmp_path):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     # Check tables exist
-    for table in ["download_attempts", "credentials", "usernames", "mac_prefixes"]:
+    for table in ["download_attempts", "credentials", "usernames", "mac_prefixes", "phone_cucm"]:
         cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
         assert cursor.fetchone() is not None
     conn.close()
