@@ -20,7 +20,12 @@ def test_real_phone_cucm_mapping():
 
     expected = _get_env("REAL_CUCM_HOST")
     if expected:
-        assert expected in cucm
+        expected_norm = expected.lower().strip()
+        cucm_norm = cucm.lower().strip()
+        if "." in expected_norm:
+            assert cucm_norm == expected_norm or cucm_norm.endswith(f".{expected_norm}")
+        else:
+            assert cucm_norm == expected_norm or cucm_norm.split(".")[0] == expected_norm
 
 
 @pytest.mark.integration
