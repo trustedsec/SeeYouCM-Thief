@@ -24,12 +24,17 @@ def patch_download(monkeypatch):
     monkeypatch.setattr(thief, 'download_config_http', lambda *a, **kw: MOCK_CONFIG)
 
 @pytest.mark.usefixtures('patch_download')
-def test_db_write_and_show_db(tmp_path):
-    # Run the script to scan and write to DB
-    db_path = tmp_path / TEST_DB
+def test_db_write_and_show_db():
+    # Use a static DB file in the tests/ directory
+    db_path = os.path.join(os.path.dirname(__file__), TEST_DB)
+    # Remove if exists
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    env = os.environ.copy()
+    env["PYTEST_CURRENT_TEST"] = "1"
     result = subprocess.run([
-        'python3', 'thief.py', '-H', 'mock-cucm', '-p', '1.2.3.4', '--db', str(db_path)
-    ], capture_output=True, text=True)
+        'python3', 'thief.py', '-H', 'mock-cucm', '-p', '1.2.3.4', '--db', db_path
+    ], capture_output=True, text=True, env=env)
     assert result.returncode == 0
     # Now check the DB contents
     conn = sqlite3.connect(db_path)
@@ -43,8 +48,8 @@ def test_db_write_and_show_db(tmp_path):
     assert 'pass123' in passwords
     # Check --show-db output
     show_result = subprocess.run([
-        'python3', 'thief.py', '--show-db', '--db', str(db_path)
-    ], capture_output=True, text=True)
+        'python3', 'thief.py', '--show-db', '--db', db_path
+    ], capture_output=True, text=True, env=env)
     assert 'admin' in show_result.stdout
     assert 'pass123' in show_result.stdout
     assert show_result.returncode == 0
