@@ -484,18 +484,21 @@ def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
             
             # Write credentials
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Normalize device names to strip .cnf.xml
+            def normalize_device(device):
+                return device[:-8] if device.endswith('.cnf.xml') else device
+
             for cred in credentials:
                 username = cred[0] if cred[0] else 'N/A'
                 password = cred[1]
-                device = cred[2]
+                device = normalize_device(cred[2])
                 writer.writerow([timestamp, 'Credential', device, username, password])
-            
+
             # Write usernames only
             for user in usernames:
-                # Check if this username doesn't have a corresponding credential
-                device = user[1]
+                device = normalize_device(user[1])
                 username = user[0]
-                has_cred = any(c[2] == device and c[0] == username for c in credentials)
+                has_cred = any(normalize_device(c[2]) == device and c[0] == username for c in credentials)
                 if not has_cred:
                     writer.writerow([timestamp, 'Username', device, username, 'N/A'])
         
@@ -545,24 +548,24 @@ def init_database(db_file='thief.db'):
         )
     ''')
     
-    # Create table for credentials
+    # Create table for credentials (unique per device)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS credentials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cucm_host TEXT NOT NULL,
-            device TEXT NOT NULL,
+            device TEXT NOT NULL UNIQUE,
             username TEXT,
             password TEXT,
             discovery_time TEXT NOT NULL
         )
     ''')
-    
-    # Create table for usernames
+
+    # Create table for usernames (unique per device)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usernames (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cucm_host TEXT NOT NULL,
-            device TEXT NOT NULL,
+            device TEXT NOT NULL UNIQUE,
             username TEXT NOT NULL,
             discovery_time TEXT NOT NULL
         )
@@ -668,24 +671,26 @@ def log_credentials_to_db(cucm_host, credentials, usernames, db_file='thief.db')
         cursor = conn.cursor()
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Log credentials
+        # Log credentials (upsert by device, strip .cnf.xml if present)
         for cred in credentials:
             username = cred[0] if cred[0] else None
             password = cred[1]
             device = cred[2]
-            
+            if device.endswith('.cnf.xml'):
+                device = device[:-8]
             cursor.execute('''
-                INSERT INTO credentials (cucm_host, device, username, password, discovery_time)
+                INSERT OR REPLACE INTO credentials (cucm_host, device, username, password, discovery_time)
                 VALUES (?, ?, ?, ?, ?)
             ''', (cucm_host, device, username, password, timestamp))
-        
-        # Log usernames
+
+        # Log usernames (upsert by device, strip .cnf.xml if present)
         for user in usernames:
             username = user[0]
             device = user[1]
-            
+            if device.endswith('.cnf.xml'):
+                device = device[:-8]
             cursor.execute('''
-                INSERT INTO usernames (cucm_host, device, username, discovery_time)
+                INSERT OR REPLACE INTO usernames (cucm_host, device, username, discovery_time)
                 VALUES (?, ?, ?, ?)
             ''', (cucm_host, device, username, timestamp))
         
@@ -1207,70 +1212,107 @@ if __name__ == '__main__':
         mac_to_cucm = {}
         all_found_macs = set()
         
-        # Detect MACs and CUCM from each phone
-        successful_detections = 0
-        failed_detections = 0
-        
-        for phone in phones:
-            print(f'[{phones.index(phone) + 1}/{len(phones)}] Detecting MAC address from phone {phone}...')
-            
-            try:
-                # Try to get hostname/MAC from phone
-                hostname = get_hostname_from_phone(phone)
-                if hostname:
-                    # Extract MAC from hostname (SEP + 12 hex chars)
-                    mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
-                    if mac_match:
-                        full_mac = mac_match.group(1).upper()
-                        # Calculate prefix length so that prefix+suffix = 12
-                        prefix_len = 12 - brute_mac_len
-                        if prefix_len < 0:
-                            print(f'  ✗ Invalid brute_mac_len: {brute_mac_len} (must be <= 12)')
-                            failed_detections += 1
-                            continue
-                        partial_mac = full_mac[:prefix_len]
-                        print(f'  ✓ Detected: SEP{full_mac}')
-                        
-                        # Detect CUCM for this specific phone
-                        if CUCM_host:
-                            phone_cucm = CUCM_host
-                        else:
-                            phone_cucm = get_cucm_name_from_phone(phone)
-                            if not phone_cucm:
-                                print(f'  ✗ Could not detect CUCM host from phone {phone}')
-                                print(f'  → Skipping this phone, continuing with others...\n')
-                                failed_detections += 1
+        # Detect MACs and CUCM from each phone (parallel)
+        counts = {"success": 0, "fail": 0}
+        detect_lock = threading.Lock()
+        print_lock = threading.Lock()
+        phone_index = {p: i for i, p in enumerate(phones)}
+
+        def _safe_print(message):
+            with print_lock:
+                print(message)
+
+        if threads < 1:
+            print('Threads must be at least 1')
+            quit(1)
+
+        def detect_worker():
+            while True:
+                phone = phone_queue.get()
+                if phone is None:
+                    phone_queue.task_done()
+                    break
+                try:
+                    index = phone_index.get(phone, 0) + 1
+                    _safe_print(f'[{index}/{len(phones)}] Detecting MAC address from phone {phone}...')
+                    hostname = get_hostname_from_phone(phone)
+                    if hostname:
+                        mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
+                        if mac_match:
+                            full_mac = mac_match.group(1).upper()
+                            prefix_len = 12 - brute_mac_len
+                            if prefix_len < 0:
+                                _safe_print(f'  ✗ Invalid brute_mac_len: {brute_mac_len} (must be <= 12)')
+                                with detect_lock:
+                                    counts["fail"] += 1
+                                phone_queue.task_done()
                                 continue
-                        
-                        print(f'  ✓ CUCM Server: {phone_cucm}')
-                        print(f'  → Using partial MAC: {partial_mac} for brute force\n')
-                        
-                        all_found_macs.add(partial_mac)
-                        mac_to_cucm[partial_mac] = phone_cucm
-                        successful_detections += 1
-                        
-                        # Log MAC prefix to database unless --no-db is set
-                        if not no_db:
-                            log_phone_cucm_to_db(phone_cucm, phone, db_file)
-                            log_mac_prefix_to_db(phone_cucm, phone, full_mac, partial_mac, db_file)
+                            partial_mac = full_mac[:prefix_len]
+                            _safe_print(f'  ✓ Detected: SEP{full_mac}')
+
+                            if CUCM_host:
+                                phone_cucm = CUCM_host
+                            else:
+                                phone_cucm = get_cucm_name_from_phone(phone)
+                                if not phone_cucm:
+                                    _safe_print(f'  ✗ Could not detect CUCM host from phone {phone}')
+                                    _safe_print(f'  → Skipping this phone, continuing with others...\n')
+                                    with detect_lock:
+                                        counts["fail"] += 1
+                                    phone_queue.task_done()
+                                    continue
+
+                            _safe_print(f'  ✓ CUCM Server: {phone_cucm}')
+                            _safe_print(f'  → Using partial MAC: {partial_mac} for brute force\n')
+
+                            with detect_lock:
+                                all_found_macs.add(partial_mac)
+                                mac_to_cucm[partial_mac] = phone_cucm
+                                counts["success"] += 1
+
+                            if not no_db:
+                                log_phone_cucm_to_db(phone_cucm, phone, db_file)
+                                log_mac_prefix_to_db(phone_cucm, phone, full_mac, partial_mac, db_file)
+                        else:
+                            _safe_print(f'  ✗ Could not extract MAC from hostname: {hostname}')
+                            _safe_print(f'  → Skipping this phone, continuing with others...\n')
+                            with detect_lock:
+                                counts["fail"] += 1
                     else:
-                        print(f'  ✗ Could not extract MAC from hostname: {hostname}')
-                        print(f'  → Skipping this phone, continuing with others...\n')
-                        failed_detections += 1
-                else:
-                    print(f'  ✗ Could not detect hostname from phone {phone}')
-                    print(f'  → Phone may be unreachable or not a Cisco device')
-                    print(f'  → Skipping this phone, continuing with others...\n')
-                    failed_detections += 1
-            except KeyboardInterrupt:
-                print(f'\n[!] Interrupted by user. Stopping phone detection.')
-                break
-            except Exception as e:
-                print(f'  ✗ Error detecting MAC from {phone}: {str(e)}')
-                print(f'  → Skipping this phone, continuing with others...\n')
-                failed_detections += 1
+                        _safe_print(f'  ✗ Could not detect hostname from phone {phone}')
+                        _safe_print(f'  → Phone may be unreachable or not a Cisco device')
+                        _safe_print(f'  → Skipping this phone, continuing with others...\n')
+                        with detect_lock:
+                            counts["fail"] += 1
+                except Exception as e:
+                    _safe_print(f'  ✗ Error detecting MAC from {phone}: {str(e)}')
+                    _safe_print(f'  → Skipping this phone, continuing with others...\n')
+                    with detect_lock:
+                        counts["fail"] += 1
+                finally:
+                    phone_queue.task_done()
+
+        phone_queue = queue.Queue()
+        num_detect_workers = min(threads, len(phones))
+        detect_threads = []
+        for i in range(num_detect_workers):
+            t = threading.Thread(target=detect_worker, daemon=True, name=f'DetectWorker-{i}')
+            t.start()
+            detect_threads.append(t)
+
+        try:
+            for phone in phones:
+                phone_queue.put(phone)
+            phone_queue.join()
+        except KeyboardInterrupt:
+            _safe_print(f'\n[!] Interrupted by user. Stopping phone detection.')
+        finally:
+            for _ in range(num_detect_workers):
+                phone_queue.put(None)
+            for t in detect_threads:
+                t.join()
         
-        print(f'Phone detection complete: {successful_detections} succeeded, {failed_detections} failed\n')
+        print(f'Phone detection complete: {counts["success"]} succeeded, {counts["fail"]} failed\n')
         
         if not all_found_macs:
             print('No MAC addresses detected. Cannot proceed with brute force.')
@@ -1458,8 +1500,22 @@ if __name__ == '__main__':
             for t in threads:
                 t.join()
 
+            # If interrupted, skip work_queue.join() and process results
             if interrupted:
-                quit(1)
+                print('[*] Processing partial results due to user interruption...')
+            else:
+                # Wait for all queued work to be completed
+                try:
+                    print(f'\n[*] Waiting for all workers to finish processing...')
+                    sys.stdout.flush()
+                except (ValueError, AttributeError):
+                    pass
+                work_queue.join()
+                try:
+                    print(f'[*] All tasks completed!')
+                    sys.stdout.flush()
+                except (ValueError, AttributeError):
+                    pass
         
         # Wait for all queued work to be completed
         try:
@@ -1631,7 +1687,7 @@ if __name__ == '__main__':
                 phone_cucm = args.host
 
             if phone_cucm is None:
-                _safe_print('Unable to automatically detect the CUCM Server for {phone}. Skipping...')
+                _safe_print(f'Unable to automatically detect the CUCM Server for {phone}. Skipping...')
                 return
 
             _safe_print('The detected IP address/hostname for the CUCM server is {}'.format(phone_cucm))
