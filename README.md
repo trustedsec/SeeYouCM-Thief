@@ -152,13 +152,29 @@ Export to CSV:
 ### Using uv (recommended)
 
 ```bash
-uv pip install -r requirements.txt
+uv sync
+uv run thief --help
+```
+
+Or install as a global CLI tool:
+
+```bash
+uv tool install .
+thief --help
 ```
 
 ### Using pip
 
 ```bash
-python3 -m pip install -r requirements.txt
+pip install .
+thief --help
+```
+
+### Legacy (without installing)
+
+```bash
+pip install -r requirements.txt
+./thief.py -H <CUCM Server IP>
 ```
 
 ## Performance
