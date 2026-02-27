@@ -1,7 +1,7 @@
 # SeeYouCM Thief
 
 ![Tests](https://github.com/trustedsec/SeeYouCM-Thief/actions/workflows/pytest.yaml/badge.svg)
-![Python](https://img.shields.io/badge/python-3.x-blue)
+![Python](https://img.shields.io/badge/python-3.13+-blue)
 
 Multi-threaded tool to automatically download and parse configuration files from Cisco phone systems searching for SSH credentials. Features intelligent caching, automatic backoff protection, and MAC address brute forcing capabilities.
 
@@ -168,13 +168,6 @@ thief --help
 ```bash
 pip install .
 thief --help
-```
-
-### Legacy (without installing)
-
-```bash
-pip install -r requirements.txt
-./thief.py -H <CUCM Server IP>
 ```
 
 ## Performance
