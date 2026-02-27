@@ -1,5 +1,0 @@
-requests
-bs4
-alive_progress
-lxml
-tftpy
