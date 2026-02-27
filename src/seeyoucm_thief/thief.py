@@ -72,6 +72,8 @@ ___________
     SeeYouCM                                    Thief
 '''
 )
+    from seeyoucm_thief import __version__
+    print(f"                         v{__version__}")
 
 
 

@@ -1,0 +1,53 @@
+# .github/workflows/version-bump.yml
+name: Version Bump
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  bump:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: latest
+        run: |
+          tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: next
+        env:
+          BRANCH: ${{ github.head_ref }}
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          major=$(echo "$TAG" | sed 's/v//' | cut -d. -f1)
+          minor=$(echo "$TAG" | sed 's/v//' | cut -d. -f2)
+          patch=$(echo "$TAG" | sed 's/v//' | cut -d. -f3)
+
+          if [[ "$BRANCH" == feat/* ]]; then
+            minor=$((minor + 1))
+            patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          echo "version=v${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --generate-notes
