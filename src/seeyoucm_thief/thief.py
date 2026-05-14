@@ -795,7 +795,21 @@ def init_database(db_file='thief.db'):
             UNIQUE(cucm_host, phone_ip)
         )
     ''')
-    
+
+    # Create table for CUCM cluster topology discovered via UDS /cucm-uds/servers
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cluster_servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queried_host TEXT NOT NULL,
+            hostname TEXT,
+            ipv4 TEXT,
+            ipv6 TEXT,
+            server_type TEXT,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(queried_host, hostname, ipv4)
+        )
+    ''')
+
     conn.commit()
     conn.close()
     return db_file
@@ -959,6 +973,34 @@ def log_mac_prefix_to_db(cucm_host, phone_ip, full_mac, partial_mac, db_file='th
         return False
 
 
+def log_cluster_servers_to_db(queried_host, servers, db_file='thief.db'):
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        inserted = 0
+        for srv in servers:
+            hostname = srv.get('hostName') or ''
+            ipv4 = srv.get('ipv4Address') or ''
+            ipv6 = srv.get('ipv6Address') or ''
+            server_type = srv.get('serverType') or ''
+            if not (hostname or ipv4 or ipv6):
+                continue
+            cursor.execute('''
+                INSERT OR IGNORE INTO cluster_servers
+                    (queried_host, hostname, ipv4, ipv6, server_type, discovery_time)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (queried_host, hostname, ipv4, ipv6, server_type, timestamp))
+            inserted += cursor.rowcount
+        conn.commit()
+        conn.close()
+        return inserted
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] log_cluster_servers_to_db error: {e}')
+        return 0
+
+
 def log_phone_cucm_to_db(cucm_host, phone_ip, db_file='thief.db'):
     """
     Log CUCM server mapping for a discovered phone.
@@ -1085,6 +1127,29 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get cluster servers (handle missing table gracefully)
+        cluster_servers = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT queried_host, hostname, ipv4, ipv6, server_type, discovery_time
+                    FROM cluster_servers
+                    WHERE queried_host = ?
+                    ORDER BY discovery_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT queried_host, hostname, ipv4, ipv6, server_type, discovery_time
+                    FROM cluster_servers
+                    ORDER BY discovery_time DESC
+                ''')
+            cluster_servers = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                cluster_servers = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
@@ -1112,7 +1177,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -1206,7 +1271,15 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             for cucm in sorted(cucm_phones.keys()):
                 for phone_ip, timestamp in cucm_phones[cucm]:
                     print(f'{phone_ip:<18} {cucm:<30}')
-        
+
+        if cluster_servers:
+            print(f'\n\033[1m[+] CUCM CLUSTER SERVERS ({len(cluster_servers)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Queried Host":<24} {"Hostname":<30} {"IPv4":<16}')
+            print("-"*70)
+            for queried, hostname, ipv4, ipv6, srv_type, timestamp in cluster_servers:
+                print(f'{queried:<24} {(hostname or ""):<30} {(ipv4 or ""):<16}')
+
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
         print(f'  • Total download attempts:      {total_attempts}')
@@ -1470,6 +1543,9 @@ def main():
             if srv_type:
                 parts.append(f'<{srv_type}>')
             print('    ' + ' '.join(parts))
+        if not no_db:
+            inserted = log_cluster_servers_to_db(CUCM_host, servers, db_file)
+            print(f'[+] Logged {inserted} new cluster server entry/entries to database')
         quit(0)
 
     if args.userenum:
