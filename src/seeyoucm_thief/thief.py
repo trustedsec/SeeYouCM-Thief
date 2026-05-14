@@ -1348,6 +1348,10 @@ def main():
     # Enable tftpy logging only in debug mode
     configure_tftpy_logging(debug)
 
+    dbg(f'parsed args: host={CUCM_host} phones={phones} brute_mac={brute_mac} '
+        f'enumsubnet={enumsubnet} userenum={args.userenum} use_tftp={use_tftp} '
+        f'threads={threads} db={db_file} no_db={no_db} force={force_download}')
+
     get_version(CUCM_host)
 
     if args.userenum:
@@ -1952,6 +1956,15 @@ def main():
         quit(0)
     elif args.host:
         CUCM_host = args.host
+        if not phones and not hostnames:
+            print('[-] -H/--host alone has no way to discover config filenames.')
+            print('[-] Combine -H with one of:')
+            print('      -p <phone_ip>      discover hostnames/MACs from a phone')
+            print('      -b/--brute-mac     brute force MAC variations (also needs -p)')
+            print('      --userenum         enumerate users via the UDS API')
+            print('      -e <cidr>          enumerate phones from a subnet')
+            print('[-] Run with --help for full usage.')
+            quit(1)
     else:
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
