@@ -565,10 +565,18 @@ class TestGetConfigNames:
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455.cnf.xml'])
         assert result == ['SEP001122334455.cnf.xml']
 
-    def test_empty_hostnames_returns_empty(self):
+    def test_empty_hostnames_falls_back_to_cache_list(self, monkeypatch):
+        # With no hostnames, get_config_names now falls back to fetching
+        # ConfigFileCacheList.txt from the CUCM TFTP service.
+        monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [])
         result = thief.get_config_names('10.0.0.1', hostnames=[])
         assert result == []
 
-    def test_none_hostnames_returns_empty(self):
+    def test_none_hostnames_falls_back_to_cache_list(self, monkeypatch):
+        monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [
+            'SEPAABBCCDDEEFF.cnf.xml',
+            'SEPAABBCCDDEEFF.cnf.xml.sgn',
+            'RingList.xml',
+        ])
         result = thief.get_config_names('10.0.0.1', hostnames=None)
-        assert result == []
+        assert result == ['SEPAABBCCDDEEFF.cnf.xml']
