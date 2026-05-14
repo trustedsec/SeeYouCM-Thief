@@ -24,6 +24,8 @@ import tftpy
 # Protocol ports
 # TFTP port is standard (69), HTTP_TFTP_PORT is configurable for fallback
 HTTP_TFTP_PORT = 6970
+# CUCM User Data Services (UDS) API — HTTPS only, default 8443
+UDS_PORT = 8443
 # Global variables
 debug = False
 found_credentials = []
@@ -402,8 +404,32 @@ def get_config_names(cucm_host, hostnames=None):
     return []
 
 
-def get_users_api(cucm_host):
-    return []
+def get_users_api(cucm_host, port=UDS_PORT, page_size=64, timeout=10):
+    if _TEST_MODE:
+        return ['testuser1', 'testuser2']
+
+    users = []
+    first = 1
+    while True:
+        url = f'https://{cucm_host}:{port}/cucm-uds/users?first={first}&last={first + page_size - 1}'
+        try:
+            resp = requests.get(url, verify=False, timeout=timeout)
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] UDS request error: {e}')
+            break
+        if resp.status_code != 200:
+            if globals().get('debug', False):
+                print(f'[!] UDS returned HTTP {resp.status_code} for {url}')
+            break
+        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
+        if not page_users:
+            break
+        users.extend(page_users)
+        if len(page_users) < page_size:
+            break
+        first += page_size
+    return users
 
 
 def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
@@ -1120,6 +1146,8 @@ def main():
     parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
+    parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
     
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
@@ -1190,7 +1218,7 @@ def main():
                 print('[-] No phones available. Exiting.')
                 quit(1)
     
-    use_tftp = True  # TFTP is default, with automatic HTTP fallback
+    use_tftp = not args.http  # TFTP is default; --http flips to HTTP-first with TFTP fallback
     
     # Set debug flag so worker threads can access it
     debug = args.debug
@@ -1873,7 +1901,7 @@ def main():
     if args.userenum:
         print('Getting users from UDS API.')
         #each API call is limited by default to 64 users per request
-        api_users = get_users_api(CUCM_host)
+        api_users = get_users_api(CUCM_host, port=args.uds_port)
         if api_users != []:
             unique_users = set(api_users)
             api_users = list(unique_users)
