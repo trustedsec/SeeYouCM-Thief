@@ -1204,8 +1204,10 @@ def main():
     # Show banner before parsing arguments so it displays with --help
     banner()
 
+    from seeyoucm_thief import __version__
     parser = argparse.ArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
-    
+    parser.add_argument('-V', '--version', action='version', version=f'%(prog)s {__version__}')
+
     # Target Specification
     parser.add_argument('-H','--host', default=None, type=str, help='Specify CUCM (Cisco Unified Communications Manager) IP address')
     parser.add_argument('-p','--phone', type=str, action='append', help='Specify Cisco phone IP address (repeatable for multiple targets)')
