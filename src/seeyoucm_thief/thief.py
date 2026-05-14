@@ -356,10 +356,30 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
             work_queue.task_done()
 
 
-def get_version(cucm_host):
+def get_version(cucm_host, port=UDS_PORT, timeout=10):
     if not cucm_host:
         return None
-    return None
+    if _TEST_MODE:
+        return {'version': '12.5.1-TEST', 'prefix': '11.0(1)'}
+
+    url = f'https://{cucm_host}:{port}/cucm-uds/version'
+    dbg(f'UDS GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
+        return None
+    dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code != 200:
+        dbg(f'UDS version non-200 body (first 300 chars): {resp.text[:300]!r}')
+        return None
+
+    info = {}
+    for field in ('version', 'prefix'):
+        m = re.search(rf'<{field}>([^<]+)</{field}>', resp.text)
+        if m:
+            info[field] = m.group(1).strip()
+    return info or None
 
 
 def get_hostname_from_phone(phone_ip):
@@ -1352,7 +1372,14 @@ def main():
         f'enumsubnet={enumsubnet} userenum={args.userenum} use_tftp={use_tftp} '
         f'threads={threads} db={db_file} no_db={no_db} force={force_download}')
 
-    get_version(CUCM_host)
+    if CUCM_host:
+        version_info = get_version(CUCM_host, port=args.uds_port)
+        if version_info:
+            v = version_info.get('version', 'unknown')
+            p = version_info.get('prefix')
+            print(f'[+] CUCM {CUCM_host} version: {v}' + (f' (prefix {p})' if p else ''))
+        else:
+            print(f'[-] Could not retrieve CUCM version from https://{CUCM_host}:{args.uds_port}/cucm-uds/version (run with -d for details)')
 
     if args.userenum:
         if not CUCM_host:
@@ -1957,14 +1984,14 @@ def main():
     elif args.host:
         CUCM_host = args.host
         if not phones and not hostnames:
-            print('[-] -H/--host alone has no way to discover config filenames.')
-            print('[-] Combine -H with one of:')
+            # Version info has already been printed via get_version above.
+            # No further action is possible without phones/hostnames/brute/userenum.
+            print('[*] No discovery flag supplied — to extract configs or users add one of:')
             print('      -p <phone_ip>      discover hostnames/MACs from a phone')
             print('      -b/--brute-mac     brute force MAC variations (also needs -p)')
             print('      --userenum         enumerate users via the UDS API')
             print('      -e <cidr>          enumerate phones from a subnet')
-            print('[-] Run with --help for full usage.')
-            quit(1)
+            quit(0)
     else:
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
