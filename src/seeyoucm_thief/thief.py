@@ -540,6 +540,35 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     return users
 
 
+def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
+    if _TEST_MODE:
+        return [{'hostName': 'cucm-pub.test', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'}]
+
+    url = f'https://{cucm_host}:{port}/cucm-uds/servers'
+    dbg(f'UDS GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
+        return []
+    dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code != 200:
+        dbg(f'UDS servers non-200 body (first 300 chars): {resp.text[:300]!r}')
+        return []
+
+    servers = []
+    for block in re.findall(r'<server\b[^>]*>(.*?)</server>', resp.text, re.DOTALL):
+        srv = {}
+        for field in ('hostName', 'ipv4Address', 'ipv6Address', 'serverType'):
+            m = re.search(rf'<{field}>([^<]+)</{field}>', block)
+            if m:
+                srv[field] = m.group(1).strip()
+        if srv:
+            servers.append(srv)
+    dbg(f'UDS parsed {len(servers)} server entries from cluster topology')
+    return servers
+
+
 def _uds_next_link(body, base_url, fallback_start):
     # HATEOAS variants seen in CUCM UDS responses
     m = re.search(r'<link\b[^>]*\brel="next"[^>]*\bhref="([^"]+)"', body, re.IGNORECASE)
@@ -1269,6 +1298,7 @@ def main():
     parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
     
@@ -1399,7 +1429,7 @@ def main():
     configure_tftpy_logging(debug)
 
     dbg(f'parsed args: host={CUCM_host} phones={phones} brute_mac={brute_mac} '
-        f'enumsubnet={enumsubnet} userenum={args.userenum} use_tftp={use_tftp} '
+        f'enumsubnet={enumsubnet} userenum={args.userenum} servers={args.servers} use_tftp={use_tftp} '
         f'threads={threads} db={db_file} no_db={no_db} force={force_download}')
 
     if CUCM_host:
@@ -1410,6 +1440,31 @@ def main():
             print(f'[+] CUCM {CUCM_host} version: {v}' + (f' (prefix {p})' if p else ''))
         else:
             print(f'[-] Could not retrieve CUCM version from https://{CUCM_host}:{args.uds_port}/cucm-uds/version (run with -d for details)')
+
+    if args.servers:
+        if not CUCM_host:
+            print('--servers requires -H/--host to specify the CUCM server')
+            quit(1)
+        print(f'Enumerating CUCM cluster via https://{CUCM_host}:{args.uds_port}/cucm-uds/servers')
+        servers = get_servers_api(CUCM_host, port=args.uds_port)
+        if not servers:
+            print('[-] No servers returned. Re-run with -d for request/response details.')
+            quit(0)
+        print(f'[+] Discovered {len(servers)} cluster member(s):')
+        for srv in servers:
+            host = srv.get('hostName', '?')
+            ipv4 = srv.get('ipv4Address', '')
+            ipv6 = srv.get('ipv6Address', '')
+            srv_type = srv.get('serverType', '')
+            parts = [host]
+            if ipv4:
+                parts.append(f'({ipv4})')
+            if ipv6:
+                parts.append(f'[v6: {ipv6}]')
+            if srv_type:
+                parts.append(f'<{srv_type}>')
+            print('    ' + ' '.join(parts))
+        quit(0)
 
     if args.userenum:
         if not CUCM_host:
