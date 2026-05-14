@@ -429,34 +429,31 @@ def get_config_names(cucm_host, hostnames=None):
     return []
 
 
-def get_users_api(cucm_host, port=UDS_PORT, page_size=64, timeout=10):
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10):
     if _TEST_MODE:
         return ['testuser1', 'testuser2']
 
-    users = []
-    first = 1
-    while True:
-        url = f'https://{cucm_host}:{port}/cucm-uds/users?first={first}&last={first + page_size - 1}'
-        dbg(f'UDS GET {url} (timeout={timeout}s)')
-        try:
-            resp = requests.get(url, verify=False, timeout=timeout)
-        except Exception as e:
-            dbg(f'UDS {url} raised {type(e).__name__}: {e}')
-            break
-        dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
-        if resp.status_code != 200:
-            dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
-            break
-        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
-        dbg(f'UDS page first={first} parsed {len(page_users)} userName entries')
-        if not page_users:
-            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
-            break
-        users.extend(page_users)
-        if len(page_users) < page_size:
-            break
-        first += page_size
-    dbg(f'UDS total users collected: {len(users)}')
+    url = f'https://{cucm_host}:{port}/cucm-uds/users'
+    dbg(f'UDS GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
+        return []
+    dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code != 200:
+        dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
+        return []
+
+    users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
+    total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text)
+    if not total_match:
+        total_match = re.search(r'<totalCount>(\d+)</totalCount>', resp.text)
+    total = int(total_match.group(1)) if total_match else None
+    dbg(f'UDS parsed {len(users)} userName entries (server totalCount={total})')
+    if total is not None and total > len(users):
+        print(f'[!] UDS reports {total} total users but only {len(users)} were returned in one response.')
+        print(f'[!] Pagination beyond the default page is not currently supported — extend get_users_api if needed.')
     return users
 
 
