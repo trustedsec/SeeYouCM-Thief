@@ -121,7 +121,9 @@ Export to CSV:
 ### Attack Options
 - `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone)
 - `--force`: Bypass cache and force re-download of all configuration files
-- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API
+- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory)
+- `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
+- `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)
 
 ### Output Options
 - `--csv FILENAME`: Export discovered credentials to CSV file
