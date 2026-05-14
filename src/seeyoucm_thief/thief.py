@@ -429,32 +429,74 @@ def get_config_names(cucm_host, hostnames=None):
     return []
 
 
-def get_users_api(cucm_host, port=UDS_PORT, timeout=10):
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=200):
     if _TEST_MODE:
         return ['testuser1', 'testuser2']
 
-    url = f'https://{cucm_host}:{port}/cucm-uds/users'
-    dbg(f'UDS GET {url} (timeout={timeout}s)')
-    try:
-        resp = requests.get(url, verify=False, timeout=timeout)
-    except Exception as e:
-        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
-        return []
-    dbg(f'UDS {url} -> {resp.status_code} ({len(resp.content)} bytes)')
-    if resp.status_code != 200:
-        dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
-        return []
+    base = f'https://{cucm_host}:{port}/cucm-uds/users'
+    users = []
+    seen_urls = set()
+    next_url = base
+    pages = 0
+    total = None
 
-    users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
-    total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text)
-    if not total_match:
-        total_match = re.search(r'<totalCount>(\d+)</totalCount>', resp.text)
-    total = int(total_match.group(1)) if total_match else None
-    dbg(f'UDS parsed {len(users)} userName entries (server totalCount={total})')
-    if total is not None and total > len(users):
-        print(f'[!] UDS reports {total} total users but only {len(users)} were returned in one response.')
-        print(f'[!] Pagination beyond the default page is not currently supported — extend get_users_api if needed.')
+    while next_url and pages < max_pages:
+        if next_url in seen_urls:
+            dbg(f'UDS pagination loop detected at {next_url}, stopping')
+            break
+        seen_urls.add(next_url)
+        pages += 1
+
+        dbg(f'UDS GET {next_url} (timeout={timeout}s)')
+        try:
+            resp = requests.get(next_url, verify=False, timeout=timeout)
+        except Exception as e:
+            dbg(f'UDS {next_url} raised {type(e).__name__}: {e}')
+            break
+        dbg(f'UDS {next_url} -> {resp.status_code} ({len(resp.content)} bytes)')
+        if resp.status_code != 200:
+            dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
+            break
+
+        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
+        dbg(f'UDS page {pages} parsed {len(page_users)} userName entries')
+        if not page_users:
+            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
+            break
+        users.extend(page_users)
+
+        if total is None:
+            total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text) \
+                or re.search(r'<totalCount>(\d+)</totalCount>', resp.text)
+            if total_match:
+                total = int(total_match.group(1))
+                dbg(f'UDS server reports totalCount={total}')
+
+        if total is not None and len(users) >= total:
+            break
+
+        next_url = _uds_next_link(resp.text, base, len(users) + 1)
+        if not next_url:
+            dbg('UDS no next-page link found; stopping pagination')
+            break
+
+    dbg(f'UDS total users collected: {len(users)} across {pages} page(s)')
+    if total is not None and len(users) < total:
+        print(f'[!] UDS reports {total} total users but only {len(users)} were retrieved.')
     return users
+
+
+def _uds_next_link(body, base_url, fallback_start):
+    # HATEOAS variants seen in CUCM UDS responses
+    m = re.search(r'<link\b[^>]*\brel="next"[^>]*\bhref="([^"]+)"', body, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r'<next>([^<]+)</next>', body, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Fallback: try ?start=N (most common Cisco UDS pagination param)
+    sep = '&' if '?' in base_url else '?'
+    return f'{base_url}{sep}start={fallback_start}'
 
 
 def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
