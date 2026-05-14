@@ -563,6 +563,12 @@ def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
             m = re.search(rf'<{field}>([^<]+)</{field}>', block)
             if m:
                 srv[field] = m.group(1).strip()
+        if not srv:
+            # Newer UDS (15.x+) returns the hostname as plain text inside
+            # <server>...</server> with no child elements.
+            text = re.sub(r'<[^>]+>', '', block).strip()
+            if text:
+                srv['hostName'] = text
         if srv:
             servers.append(srv)
     dbg(f'UDS parsed {len(servers)} server entries from cluster topology')
