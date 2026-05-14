@@ -20,6 +20,10 @@ from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
 import tftpy
+import urllib3
+# CUCM ships self-signed certs by design; suppress the InsecureRequestWarning
+# spam that every requests.get(verify=False) call would otherwise emit.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ...existing code...
 # Protocol ports
 # TFTP port is standard (69), HTTP_TFTP_PORT is configurable for fallback
