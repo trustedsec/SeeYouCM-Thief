@@ -433,7 +433,7 @@ def get_config_names(cucm_host, hostnames=None):
     return []
 
 
-def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=200):
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     if _TEST_MODE:
         return ['testuser1', 'testuser2']
 
