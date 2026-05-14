@@ -1305,6 +1305,31 @@ def main():
 
     get_version(CUCM_host)
 
+    if args.userenum:
+        if not CUCM_host:
+            print('--userenum requires -H/--host to specify the CUCM server')
+            quit(1)
+        print(f'Getting users from UDS API at https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        api_users = get_users_api(CUCM_host, port=args.uds_port)
+        if api_users:
+            unique_users = list(set(api_users))
+            with open(outfile, mode='w') as outputfile:
+                for line in unique_users:
+                    outputfile.write(line + '\n')
+            if not no_db:
+                if log_uds_usernames_to_db(CUCM_host, unique_users, db_file):
+                    print(f'[+] Logged {len(unique_users)} UDS API usernames to database')
+                else:
+                    print(f'[-] Failed to log UDS API usernames to database')
+            print(f'The following {len(unique_users)} users were identified from the UDS API')
+            print(f'[*] Usernames written to: {outfile}')
+            if debug:
+                for username in unique_users:
+                    print(f'{username}')
+        else:
+            print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
+        quit(0)
+
     # Handle MAC brute forcing from detected phones
     if brute_mac:
         if not phones:
@@ -1926,32 +1951,6 @@ def main():
             if debug:
                 print(f'[DEBUG] log_credentials_to_db returned: {result}')
         quit(0)
-    if args.userenum:
-        print('Getting users from UDS API.')
-        #each API call is limited by default to 64 users per request
-        api_users = get_users_api(CUCM_host, port=args.uds_port)
-        if api_users != []:
-            unique_users = set(api_users)
-            api_users = list(unique_users)
-            
-            # Write to output file
-            with open(outfile, mode='w') as outputfile:
-                for line in api_users:
-                    outputfile.write(line+'\n')
-            
-            # Log to database unless --no-db flag is set
-            if not no_db:
-                if log_uds_usernames_to_db(CUCM_host, api_users, db_file):
-                    print(f'[+] Logged {len(api_users)} UDS API usernames to database')
-                else:
-                    print(f'[-] Failed to log UDS API usernames to database')
-            
-            print(f'The following {len(api_users)} users were identified from the UDS API')
-            print(f'[*] Usernames written to: {outfile}')
-            if debug:
-                for username in api_users:
-                    print('{0}'.format(username))
-
 
 if __name__ == '__main__':
     main()
