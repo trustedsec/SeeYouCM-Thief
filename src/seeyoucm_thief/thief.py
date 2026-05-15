@@ -810,6 +810,35 @@ def init_database(db_file='thief.db'):
         )
     ''')
 
+    # Create table for users enumerated via UDS /cucm-uds/users (spray feature)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(cucm_host, username)
+        )
+    ''')
+
+    # Create table for every spray attempt against the UDS user endpoint
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS spray_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            status_code INTEGER,
+            error TEXT,
+            attempt_time TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_spray_attempts_user_time
+            ON spray_attempts(username, attempt_time)
+    ''')
+
     conn.commit()
     conn.close()
     return db_file
