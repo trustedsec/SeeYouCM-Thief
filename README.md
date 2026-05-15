@@ -15,6 +15,7 @@ Multi-threaded tool to automatically download and parse configuration files from
 - **Gowitness integration**: Load phone targets directly from gowitness database
 - **CSV export**: Export discovered credentials to CSV format
 - **User enumeration**: Extract usernames via CUCM User Data Services (UDS) API
+- **Password spray**: HTTP Basic Auth spray against the UDS user endpoint with persistent per-username rate limiting and a pre-flight oracle probe
 
 ## Usage
 
@@ -75,6 +76,24 @@ Extract usernames via CUCM UDS API:
 ./thief.py -H <CUCM Server> --userenum
 ```
 
+### Password Spray
+
+Spray a single password across every UDS-enumerated user, with a default 1-hour-per-user rate limit:
+
+```bash
+./thief.py -H <CUCM Server> --spray --spray-password 'Summer2025!'
+```
+
+Iterate a password list, sleeping ~1 hour between rounds so each user is attempted at most once per hour:
+
+```bash
+./thief.py -H <CUCM Server> --spray -P passwords.txt
+```
+
+A pre-flight oracle probe sends one bogus credential to verify the endpoint validates auth. If the server returns 200 to a known-bad password, the run aborts before any real password is sent. Skip the probe with `--no-spray-probe` only after manually verifying the target. Every attempt is logged to the `spray_attempts` table; hits surface in `--show-db`.
+
+**Operator safety:** If CUCM is configured with LDAP Authentication, end-user spray attempts pass through to AD. Confirm domain lockout policy before running and tighten `--spray-rate-limit-hours` if needed.
+
 ### Database Operations
 
 View cached results:
@@ -125,6 +144,12 @@ Export to CSV:
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
 - `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)
+- `--spray`: Password-spray the UDS API (requires `-H`; mutually exclusive with `--brute-mac`)
+- `--spray-password PASSWORD`: Single password to spray across all eligible users
+- `-P, --passwords FILE`: Password list file; sprays each password in turn, sleeping ~1h between rounds
+- `--spray-threads N`: Concurrent spray workers (default: 10)
+- `--spray-rate-limit-hours N`: Per-username rate-limit window in hours (default: 1)
+- `--no-spray-probe`: Skip the pre-flight oracle probe (use only after manual verification)
 
 ### Output Options
 - `--csv FILENAME`: Export discovered credentials to CSV file
