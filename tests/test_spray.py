@@ -369,6 +369,22 @@ def test_run_spray_aborts_on_oracle_bypass(monkeypatch, db_path):
     assert mock_get.call_count == 0  # never made a real spray request
 
 
+def test_run_spray_aborts_on_oracle_unknown(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice", "bob"])
+    _patch_oracle(monkeypatch, 'unknown')
+    with patch.object(thief.requests, 'get') as mock_get:
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["Summer2025!"], threads=2,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM spray_attempts").fetchone()[0]
+    conn.close()
+    assert count == 0
+    assert mock_get.call_count == 0
+
+
 def test_run_spray_skips_rate_limited_users(monkeypatch, db_path):
     _patch_get_users(monkeypatch, ["alice", "bob", "carol"])
     _patch_oracle(monkeypatch, 'ok')

@@ -742,7 +742,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
     against /cucm-uds/user/{username}. Logs every attempt to spray_attempts.
 
     results: dict with int keys 'hits'/'misses'/'errors'/'other' and 'lock'.
-    dead_flag: threading.Event set by the orchestrator to abort a runaway round.
+    dead_flag: threading.Event — externally-settable abort signal that short-circuits the worker loop between iterations (used by tests; future versions may set this from the orchestrator for mid-round aborts).
     """
     while not dead_flag.is_set():
         try:
@@ -786,6 +786,9 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
       3. For each password: build rate-limit-filtered queue, run worker pool,
          compute kill switch, sleep ~1h before the next password.
     """
+    if _TEST_MODE:
+        return
+
     # 1. Probe
     if probe:
         # Need at least one user to probe; do a tiny pre-enum if necessary.
@@ -853,7 +856,11 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
                   f'misses={results["misses"]} errors={results["errors"]} '
                   f'other={results["other"]} (skipped {skipped})')
 
-            # 3c. Kill switch — >50% of attempts returned non-401-non-200.
+            # 3c. Kill switch — fires AFTER all workers join. If >50% of the
+            # round's attempts returned non-401-non-200 status AND we attempted
+            # at least 4 (min sample guard), abort the run before the next
+            # password round. The current round's in-flight attempts complete
+            # before the abort decision; mid-round abort is not implemented in v1.
             bad = results['errors'] + results['other']
             if total_attempted >= 4 and bad / total_attempted > 0.5:
                 print(f'[!] KILL SWITCH: {bad}/{total_attempted} attempts returned errors or '
