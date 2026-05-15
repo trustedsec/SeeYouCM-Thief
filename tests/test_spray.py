@@ -216,3 +216,24 @@ def test_oracle_check_returns_unknown_on_network_error():
     with patch.object(thief.requests, 'get', side_effect=requests.exceptions.ConnectTimeout("boom")):
         result = thief._spray_oracle_check("cucm-a.example.com", 8443, "alice")
     assert result == 'unknown'
+
+
+def test_load_password_list_strips_and_skips_blanks(tmp_path):
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("Summer2025!\n  Winter2024\n\n\t\nPassword1\n")
+    pws = thief._load_password_list(str(pw_file))
+    assert pws == ["Summer2025!", "Winter2024", "Password1"]
+
+
+def test_load_password_list_preserves_order_and_duplicates(tmp_path):
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("a\nb\na\n")
+    pws = thief._load_password_list(str(pw_file))
+    # Order matters (rounds run in file order); duplicates pass through —
+    # if the operator listed it twice, that's their call.
+    assert pws == ["a", "b", "a"]
+
+
+def test_load_password_list_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        thief._load_password_list(str(tmp_path / "does-not-exist.txt"))

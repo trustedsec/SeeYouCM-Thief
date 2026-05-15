@@ -727,6 +727,15 @@ def _spray_oracle_check(cucm_host, port, user_sample, timeout=10):
     return 'unknown'
 
 
+def _load_password_list(path):
+    """
+    Read one password per line, stripping whitespace and skipping blanks.
+    Preserves order and duplicates.
+    """
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return [line.strip() for line in f if line.strip()]
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
