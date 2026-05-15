@@ -584,6 +584,28 @@ def test_show_db_prints_spray_hits(db_path, capsys):
     assert "bob" not in out  # misses are not shown in the hits section
 
 
+def test_spray_worker_urlencodes_username(db_path):
+    """A username with special chars must not alter the URL path."""
+    work = queue_mod.Queue()
+    work.put("weird/name?x")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    captured_url = {}
+
+    def fake_get(url, **kwargs):
+        captured_url['url'] = url
+        return MagicMock(status_code=401, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief._spray_worker(
+            work_queue=work, results=results, password="p",
+            cucm_host="cucm-a.example.com", port=8443, db_file=db_path,
+            dead_flag=threading.Event(),
+        )
+    assert captured_url['url'] == (
+        'https://cucm-a.example.com:8443/cucm-uds/user/weird%2Fname%3Fx'
+    )
+
+
 def test_show_db_omits_spray_section_when_no_hits(db_path, capsys):
     # Seed only a miss; no 200s.
     thief.log_spray_attempt("cucm-a.example.com", "bob", "Winter", 401, None, db_path)

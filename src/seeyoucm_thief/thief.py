@@ -17,6 +17,7 @@ import queue
 import random
 import secrets
 from datetime import datetime
+from urllib.parse import quote
 from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
 from alive_progress import alive_bar
@@ -712,7 +713,7 @@ def _spray_oracle_check(cucm_host, port, user_sample, timeout=10):
                     decide whether to continue with --no-spray-probe.
     """
     bogus = f'spray-probe-{secrets.token_hex(4)}'
-    url = f'https://{cucm_host}:{port}/cucm-uds/user/{user_sample}'
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(user_sample, safe="")}'
     dbg(f'UDS oracle probe GET {url} (timeout={timeout}s)')
     try:
         resp = requests.get(url, auth=(user_sample, bogus), verify=False, timeout=timeout)
@@ -750,7 +751,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         except queue.Empty:
             return
 
-        url = f'https://{cucm_host}:{port}/cucm-uds/user/{username}'
+        url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
         status_code = None
         error = None
         try:
