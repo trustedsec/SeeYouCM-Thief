@@ -608,6 +608,36 @@ def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
             print(f'[!] log_uds_usernames_to_db error: {e}')
         return False
 
+
+def record_uds_users(cucm_host, usernames, db_file='thief.db'):
+    """
+    Upsert the live UDS user enumeration into the uds_users table.
+
+    On conflict (same cucm_host + username), updates last_seen but preserves
+    first_seen. Returns the number of new rows inserted.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        inserted = 0
+        for username in usernames:
+            cursor.execute('''
+                INSERT INTO uds_users (cucm_host, username, first_seen, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(cucm_host, username)
+                  DO UPDATE SET last_seen = excluded.last_seen
+            ''', (cucm_host, username, timestamp, timestamp))
+            inserted += cursor.rowcount
+        conn.commit()
+        conn.close()
+        return inserted
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] record_uds_users error: {e}')
+        return 0
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
