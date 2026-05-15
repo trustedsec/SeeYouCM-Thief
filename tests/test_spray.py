@@ -144,3 +144,43 @@ def test_log_spray_attempt_appends_history(db_path):
     ).fetchone()[0]
     conn.close()
     assert count == 3
+
+
+def _insert_attempt_at(db_path, username, minutes_ago, status_code=401, cucm_host="cucm-a.example.com"):
+    ts = (datetime.now() - timedelta(minutes=minutes_ago)).strftime('%Y-%m-%d %H:%M:%S')
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO spray_attempts "
+        "(cucm_host, username, password, status_code, error, attempt_time) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (cucm_host, username, "p", status_code, None, ts),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_is_user_rate_limited_recent_attempt(db_path):
+    _insert_attempt_at(db_path, "alice", minutes_ago=30)
+    assert thief.is_user_rate_limited("alice", db_path, hours=1) is True
+
+
+def test_is_user_rate_limited_expired_window(db_path):
+    _insert_attempt_at(db_path, "alice", minutes_ago=120)
+    assert thief.is_user_rate_limited("alice", db_path, hours=1) is False
+
+
+def test_is_user_rate_limited_no_history(db_path):
+    assert thief.is_user_rate_limited("never-tried", db_path, hours=1) is False
+
+
+def test_is_user_rate_limited_is_global_across_hosts(db_path):
+    """Per design: rate limit is per-username globally, not per (host, username)."""
+    _insert_attempt_at(db_path, "alice", minutes_ago=30, cucm_host="cucm-a.example.com")
+    # Even though we're 'asking' about a different host, alice is still limited.
+    assert thief.is_user_rate_limited("alice", db_path, hours=1) is True
+
+
+def test_is_user_rate_limited_respects_custom_window(db_path):
+    _insert_attempt_at(db_path, "alice", minutes_ago=90)  # 1.5h ago
+    assert thief.is_user_rate_limited("alice", db_path, hours=1) is False
+    assert thief.is_user_rate_limited("alice", db_path, hours=2) is True

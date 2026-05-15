@@ -672,6 +672,31 @@ def log_spray_attempt(cucm_host, username, password, status_code, error, db_file
             return
 
 
+def is_user_rate_limited(username, db_file='thief.db', hours=1):
+    """
+    Return True iff `username` has any spray_attempts row within the last `hours`.
+    Per-username globally — the cucm_host column is not part of the check.
+    """
+    try:
+        modifier = f'-{int(hours)} hours'
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM spray_attempts
+             WHERE username = ?
+               AND attempt_time > datetime('now', 'localtime', ?)
+             LIMIT 1
+        ''', (username, modifier))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] is_user_rate_limited error: {e}')
+        # Fail closed: if we can't check, assume limited (don't spray).
+        return True
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
