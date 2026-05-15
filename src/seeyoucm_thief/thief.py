@@ -1108,6 +1108,15 @@ def init_database(db_file='thief.db'):
 
     conn.commit()
     conn.close()
+    # Tighten DB file permissions — config XML and spray attempts contain
+    # plaintext secrets; default umask can leave them world-readable.
+    try:
+        os.chmod(db_file, 0o600)
+    except OSError:
+        # Best-effort: on filesystems without POSIX perms (FAT, some network
+        # mounts) chmod will fail. The operator still has the DB; we just
+        # couldn't restrict access. Not fatal.
+        pass
     return db_file
 
 def check_already_attempted(cucm_host, filename, db_file='thief.db'):

@@ -65,6 +65,16 @@ def test_init_database_creates_spray_attempts_index(db_path):
     assert _index_exists(db_path, "idx_spray_attempts_user_time")
 
 
+def test_init_database_sets_restrictive_file_mode(tmp_path):
+    """Plaintext secrets live in this DB; the file must not be world-readable."""
+    import stat
+    p = tmp_path / "thief.db"
+    thief.init_database(str(p))
+    mode = stat.S_IMODE(p.stat().st_mode)
+    # Owner read+write only; nothing for group or other.
+    assert mode == 0o600, f'expected 0600, got {oct(mode)}'
+
+
 def test_record_uds_users_inserts_new_rows(db_path):
     thief.record_uds_users("cucm-a.example.com", ["alice", "bob"], db_path)
     conn = sqlite3.connect(db_path)
