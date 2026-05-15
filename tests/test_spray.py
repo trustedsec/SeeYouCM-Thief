@@ -535,6 +535,7 @@ def test_cli_invokes_run_spray_with_correct_args(monkeypatch, tmp_path):
     assert called['rate_limit_hours'] == 2
     assert called['probe'] is True
     assert called['db_file'] == str(db)
+    assert called['port'] == 8443  # default --uds-port
 
 
 def test_cli_password_file_is_loaded(monkeypatch, tmp_path):

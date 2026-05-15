@@ -1888,7 +1888,7 @@ def main():
         if args.brute_mac:
             print('--spray and --brute-mac are mutually exclusive')
             quit(1)
-        if bool(args.spray_password) == bool(args.passwords):
+        if (args.spray_password is not None) == (args.passwords is not None):
             # Both set, or neither set — both are errors.
             print('--spray requires exactly one of --spray-password or -P/--passwords')
             quit(1)
