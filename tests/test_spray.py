@@ -584,6 +584,21 @@ def test_show_db_prints_spray_hits(db_path, capsys):
     assert "bob" not in out  # misses are not shown in the hits section
 
 
+def test_cli_directory_as_password_file_errors_cleanly(monkeypatch, tmp_path, capsys):
+    """Passing a directory to -P should print a clean error, not a traceback."""
+    db = tmp_path / "thief.db"
+    target_dir = tmp_path / "not-a-file"
+    target_dir.mkdir()
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray', '-P', str(target_dir),
+        '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert 'Could not read password file' in out or 'Password file not found' in out
+
+
 def test_spray_worker_urlencodes_username(db_path):
     """A username with special chars must not alter the URL path."""
     work = queue_mod.Queue()

@@ -1928,6 +1928,9 @@ def main():
             except FileNotFoundError:
                 print(f'[-] Password file not found: {args.passwords}')
                 quit(1)
+            except OSError as e:
+                print(f'[-] Could not read password file {args.passwords}: {e}')
+                quit(1)
             if not passwords:
                 print(f'[-] Password file is empty: {args.passwords}')
                 quit(1)
