@@ -184,3 +184,35 @@ def test_is_user_rate_limited_respects_custom_window(db_path):
     _insert_attempt_at(db_path, "alice", minutes_ago=90)  # 1.5h ago
     assert thief.is_user_rate_limited("alice", db_path, hours=1) is False
     assert thief.is_user_rate_limited("alice", db_path, hours=2) is True
+
+
+def test_oracle_check_returns_ok_on_401():
+    fake_resp = MagicMock(status_code=401, text="")
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        result = thief._spray_oracle_check("cucm-a.example.com", 8443, "alice")
+    assert result == 'ok'
+    # The probe should have called the per-user endpoint with Basic Auth
+    call_kwargs = mock_get.call_args.kwargs
+    assert 'auth' in call_kwargs
+    assert call_kwargs['auth'][0] == 'alice'
+    assert call_kwargs['auth'][1].startswith('spray-probe-')
+
+
+def test_oracle_check_returns_bypass_on_200():
+    fake_resp = MagicMock(status_code=200, text="<user/>")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        result = thief._spray_oracle_check("cucm-a.example.com", 8443, "alice")
+    assert result == 'bypass'
+
+
+def test_oracle_check_returns_unknown_on_403():
+    fake_resp = MagicMock(status_code=403, text="")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        result = thief._spray_oracle_check("cucm-a.example.com", 8443, "alice")
+    assert result == 'unknown'
+
+
+def test_oracle_check_returns_unknown_on_network_error():
+    with patch.object(thief.requests, 'get', side_effect=requests.exceptions.ConnectTimeout("boom")):
+        result = thief._spray_oracle_check("cucm-a.example.com", 8443, "alice")
+    assert result == 'unknown'

