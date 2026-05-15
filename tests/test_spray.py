@@ -570,3 +570,23 @@ def test_cli_no_spray_probe_passes_probe_false(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         thief.main()
     assert called['probe'] is False
+
+
+def test_show_db_prints_spray_hits(db_path, capsys):
+    # Seed one hit and one miss
+    thief.log_spray_attempt("cucm-a.example.com", "alice", "Summer2025!", 200, None, db_path)
+    thief.log_spray_attempt("cucm-a.example.com", "bob", "Summer2025!", 401, None, db_path)
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Spray Hits" in out
+    assert "alice" in out
+    assert "Summer2025!" in out
+    assert "bob" not in out  # misses are not shown in the hits section
+
+
+def test_show_db_omits_spray_section_when_no_hits(db_path, capsys):
+    # Seed only a miss; no 200s.
+    thief.log_spray_attempt("cucm-a.example.com", "bob", "Winter", 401, None, db_path)
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Spray Hits" not in out

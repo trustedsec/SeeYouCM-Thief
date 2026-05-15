@@ -1445,6 +1445,30 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get UDS spray hits (status_code == 200)
+        spray_hits = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM spray_attempts
+                     WHERE status_code = 200 AND cucm_host = ?
+                     ORDER BY attempt_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM spray_attempts
+                     WHERE status_code = 200
+                     ORDER BY attempt_time DESC
+                ''')
+            spray_hits = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                spray_hits = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
@@ -1472,7 +1496,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -1574,6 +1598,11 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print("-"*70)
             for queried, hostname, ipv4, ipv6, srv_type, timestamp in cluster_servers:
                 print(f'{queried:<24} {(hostname or ""):<30} {(ipv4 or ""):<16}')
+
+        if spray_hits:
+            print('\n=== UDS Spray Hits ===')
+            for host, user, pw, ts in spray_hits:
+                print(f'  [{ts}] {host}  {user} : {pw}')
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
