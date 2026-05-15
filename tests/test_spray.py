@@ -314,3 +314,155 @@ def test_spray_worker_short_circuits_on_dead_flag(db_path):
             dead_flag=dead_flag,
         )
     assert mock_get.call_count == 0  # never made any HTTP calls
+
+
+def _patch_get_users(monkeypatch, users):
+    """Bypass the real /cucm-uds/users HTTP call by patching get_users_api."""
+    monkeypatch.setattr(thief, 'get_users_api', lambda *a, **kw: list(users))
+
+
+def _patch_oracle(monkeypatch, result='ok'):
+    monkeypatch.setattr(thief, '_spray_oracle_check', lambda *a, **kw: result)
+
+
+def test_run_spray_end_to_end_single_password(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice", "bob", "carol"])
+    _patch_oracle(monkeypatch, 'ok')
+
+    def fake_get(url, **kwargs):
+        # /cucm-uds/user/<userid>
+        userid = url.rsplit('/', 1)[-1]
+        status = 200 if userid == 'bob' else 401
+        return MagicMock(status_code=status, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["Summer2025!"], threads=2,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT username, status_code FROM spray_attempts ORDER BY username"
+    ).fetchall()
+    conn.close()
+    assert ("alice", 401) in rows
+    assert ("bob", 200) in rows
+    assert ("carol", 401) in rows
+    assert len(rows) == 3
+
+
+def test_run_spray_aborts_on_oracle_bypass(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice", "bob"])
+    _patch_oracle(monkeypatch, 'bypass')
+    with patch.object(thief.requests, 'get') as mock_get:
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["Summer2025!"], threads=2,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM spray_attempts").fetchone()[0]
+    conn.close()
+    assert count == 0
+    assert mock_get.call_count == 0  # never made a real spray request
+
+
+def test_run_spray_skips_rate_limited_users(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice", "bob", "carol"])
+    _patch_oracle(monkeypatch, 'ok')
+    _insert_attempt_at(db_path, "alice", minutes_ago=30)  # alice is already limited
+
+    requested_users = []
+
+    def fake_get(url, **kwargs):
+        userid = url.rsplit('/', 1)[-1]
+        requested_users.append(userid)
+        return MagicMock(status_code=401, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["Summer2025!"], threads=2,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+
+    assert "alice" not in requested_users
+    assert set(requested_users) == {"bob", "carol"}
+
+
+def test_run_spray_kill_switch_on_majority_403(monkeypatch, db_path):
+    users = [f"u{i}" for i in range(10)]
+    _patch_get_users(monkeypatch, users)
+    _patch_oracle(monkeypatch, 'ok')
+
+    def fake_get(url, **kwargs):
+        userid = url.rsplit('/', 1)[-1]
+        idx = int(userid[1:])
+        status = 403 if idx < 6 else 401  # 6/10 return 403
+        return MagicMock(status_code=status, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            # two passwords — kill switch should stop us before round 2
+            passwords=["p1", "p2"], threads=10,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+
+    conn = sqlite3.connect(db_path)
+    # Only password 'p1' should appear; round 2 must be aborted before any 'p2' rows are written.
+    pw_set = {row[0] for row in conn.execute("SELECT DISTINCT password FROM spray_attempts").fetchall()}
+    conn.close()
+    assert pw_set == {"p1"}
+
+
+def test_run_spray_records_users_in_uds_users(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice", "bob"])
+    _patch_oracle(monkeypatch, 'ok')
+    with patch.object(thief.requests, 'get', return_value=MagicMock(status_code=401, text="")):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["p"], threads=1,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT username FROM uds_users ORDER BY username").fetchall()
+    conn.close()
+    assert rows == [("alice",), ("bob",)]
+
+
+def test_run_spray_sleeps_between_password_rounds(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice"])
+    _patch_oracle(monkeypatch, 'ok')
+    sleeps = []
+    monkeypatch.setattr(thief.time, 'sleep', lambda s: sleeps.append(s))
+    with patch.object(thief.requests, 'get', return_value=MagicMock(status_code=401, text="")):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["p1", "p2"], threads=1,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+        )
+    # Exactly one inter-round sleep, within 3600 ± 60 seconds.
+    inter_round = [s for s in sleeps if s > 100]  # filter out worker-internal sleeps if any
+    assert len(inter_round) == 1
+    assert 3540 <= inter_round[0] <= 3660
+
+
+def test_run_spray_skips_probe_when_disabled(monkeypatch, db_path):
+    _patch_get_users(monkeypatch, ["alice"])
+    probe_called = {"n": 0}
+
+    def fake_probe(*a, **kw):
+        probe_called["n"] += 1
+        return 'ok'
+
+    monkeypatch.setattr(thief, '_spray_oracle_check', fake_probe)
+    with patch.object(thief.requests, 'get', return_value=MagicMock(status_code=401, text="")):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=["p"], threads=1,
+            rate_limit_hours=1, probe=False, db_file=db_path,
+        )
+    assert probe_called["n"] == 0
