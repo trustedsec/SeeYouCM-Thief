@@ -482,3 +482,90 @@ def test_run_spray_skips_probe_when_disabled(monkeypatch, db_path):
             rate_limit_hours=1, probe=False, db_file=db_path,
         )
     assert probe_called["n"] == 0
+
+
+def test_cli_requires_password_when_spray(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray'])
+    with pytest.raises(SystemExit):
+        thief.main()
+    captured = capsys.readouterr()
+    assert '--spray-password' in captured.err or '--spray-password' in captured.out
+
+
+def test_cli_rejects_both_password_and_passwords_file(monkeypatch, tmp_path, capsys):
+    pw = tmp_path / "p.txt"
+    pw.write_text("x\n")
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray',
+        '--spray-password', 'a', '-P', str(pw),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+
+
+def test_cli_rejects_spray_with_brute_mac(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac',
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+
+
+def test_cli_invokes_run_spray_with_correct_args(monkeypatch, tmp_path):
+    called = {}
+
+    def fake_run_spray(**kwargs):
+        called.update(kwargs)
+
+    monkeypatch.setattr(thief, 'run_spray', fake_run_spray)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0', 'prefix': None})
+    db = tmp_path / "thief.db"
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray',
+        '--spray-password', 'Summer2025!',
+        '--spray-threads', '5',
+        '--spray-rate-limit-hours', '2',
+        '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    assert called['cucm_host'] == '1.2.3.4'
+    assert called['passwords'] == ['Summer2025!']
+    assert called['threads'] == 5
+    assert called['rate_limit_hours'] == 2
+    assert called['probe'] is True
+    assert called['db_file'] == str(db)
+
+
+def test_cli_password_file_is_loaded(monkeypatch, tmp_path):
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("p1\np2\np3\n")
+    called = {}
+
+    def fake_run_spray(**kwargs):
+        called.update(kwargs)
+
+    monkeypatch.setattr(thief, 'run_spray', fake_run_spray)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0', 'prefix': None})
+    db = tmp_path / "thief.db"
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray', '-P', str(pw_file),
+        '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    assert called['passwords'] == ['p1', 'p2', 'p3']
+
+
+def test_cli_no_spray_probe_passes_probe_false(monkeypatch, tmp_path):
+    called = {}
+    monkeypatch.setattr(thief, 'run_spray', lambda **kw: called.update(kw))
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db = tmp_path / "thief.db"
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'p',
+        '--no-spray-probe', '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    assert called['probe'] is False

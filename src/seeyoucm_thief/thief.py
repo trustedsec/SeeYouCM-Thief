@@ -1675,7 +1675,20 @@ def main():
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
-    
+    # Password spray (UDS Basic Auth against /cucm-uds/user/{userid})
+    parser.add_argument('--spray', action='store_true', default=False,
+                        help='Password-spray the UDS API (requires -H; mutually exclusive with --brute-mac)')
+    parser.add_argument('--spray-password', type=str, default=None,
+                        help='Single password to spray across all eligible users')
+    parser.add_argument('-P', '--passwords', type=str, default=None, metavar='FILE',
+                        help='Password list file; one password per line; rounds separated by ~1h sleep')
+    parser.add_argument('--spray-threads', type=int, default=10,
+                        help='Concurrent spray workers (default: 10)')
+    parser.add_argument('--spray-rate-limit-hours', type=int, default=1,
+                        help='Per-username rate-limit window in hours (default: 1)')
+    parser.add_argument('--no-spray-probe', action='store_true', default=False,
+                        help='Skip the pre-flight oracle probe (use only after manual verification)')
+
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
     parser.add_argument('--outfile', type=str, default='cucm_users.txt', help='Specify output file for enumerated usernames (default: cucm_users.txt)')
@@ -1866,6 +1879,40 @@ def main():
                     print(f'{username}')
         else:
             print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
+        quit(0)
+
+    if args.spray:
+        if not CUCM_host:
+            print('--spray requires -H/--host to specify the CUCM server')
+            quit(1)
+        if args.brute_mac:
+            print('--spray and --brute-mac are mutually exclusive')
+            quit(1)
+        if bool(args.spray_password) == bool(args.passwords):
+            # Both set, or neither set — both are errors.
+            print('--spray requires exactly one of --spray-password or -P/--passwords')
+            quit(1)
+        if args.passwords:
+            try:
+                passwords = _load_password_list(args.passwords)
+            except FileNotFoundError:
+                print(f'[-] Password file not found: {args.passwords}')
+                quit(1)
+            if not passwords:
+                print(f'[-] Password file is empty: {args.passwords}')
+                quit(1)
+        else:
+            passwords = [args.spray_password]
+
+        run_spray(
+            cucm_host=CUCM_host,
+            port=args.uds_port,
+            passwords=passwords,
+            threads=args.spray_threads,
+            rate_limit_hours=args.spray_rate_limit_hours,
+            probe=not args.no_spray_probe,
+            db_file=db_file,
+        )
         quit(0)
 
     # Handle MAC brute forcing from detected phones
