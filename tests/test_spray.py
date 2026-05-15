@@ -237,3 +237,82 @@ def test_load_password_list_preserves_order_and_duplicates(tmp_path):
 def test_load_password_list_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         thief._load_password_list(str(tmp_path / "does-not-exist.txt"))
+
+
+import queue as queue_mod
+import threading
+
+
+def test_spray_worker_logs_hit_on_200(db_path):
+    work = queue_mod.Queue()
+    work.put("alice")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    dead_flag = threading.Event()
+    fake_resp = MagicMock(status_code=200, text="<user/>")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        thief._spray_worker(
+            work_queue=work,
+            results=results,
+            password="Summer2025!",
+            cucm_host="cucm-a.example.com",
+            port=8443,
+            db_file=db_path,
+            dead_flag=dead_flag,
+        )
+    assert results["hits"] == 1
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT status_code, password FROM spray_attempts WHERE username='alice'"
+    ).fetchone()
+    conn.close()
+    assert row == (200, "Summer2025!")
+
+
+def test_spray_worker_logs_miss_on_401(db_path):
+    work = queue_mod.Queue()
+    work.put("bob")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    fake_resp = MagicMock(status_code=401, text="")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        thief._spray_worker(
+            work_queue=work, results=results, password="bad",
+            cucm_host="cucm-a.example.com", port=8443, db_file=db_path,
+            dead_flag=threading.Event(),
+        )
+    assert results["misses"] == 1
+
+
+def test_spray_worker_logs_error_on_timeout(db_path):
+    work = queue_mod.Queue()
+    work.put("carol")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    with patch.object(thief.requests, 'get', side_effect=requests.exceptions.ConnectTimeout("boom")):
+        thief._spray_worker(
+            work_queue=work, results=results, password="p",
+            cucm_host="cucm-a.example.com", port=8443, db_file=db_path,
+            dead_flag=threading.Event(),
+        )
+    assert results["errors"] == 1
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT status_code, error FROM spray_attempts WHERE username='carol'"
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+    assert row[1].startswith("timeout:")
+
+
+def test_spray_worker_short_circuits_on_dead_flag(db_path):
+    work = queue_mod.Queue()
+    work.put("alice")
+    work.put("bob")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    dead_flag = threading.Event()
+    dead_flag.set()
+    with patch.object(thief.requests, 'get') as mock_get:
+        thief._spray_worker(
+            work_queue=work, results=results, password="p",
+            cucm_host="cucm-a.example.com", port=8443, db_file=db_path,
+            dead_flag=dead_flag,
+        )
+    assert mock_get.call_count == 0  # never made any HTTP calls
