@@ -1,6 +1,8 @@
 """Tests for the UDS password-spray feature."""
 import os
+import queue as queue_mod
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -237,10 +239,6 @@ def test_load_password_list_preserves_order_and_duplicates(tmp_path):
 def test_load_password_list_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         thief._load_password_list(str(tmp_path / "does-not-exist.txt"))
-
-
-import queue as queue_mod
-import threading
 
 
 def test_spray_worker_logs_hit_on_200(db_path):
