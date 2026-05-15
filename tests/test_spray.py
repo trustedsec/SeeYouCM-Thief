@@ -104,3 +104,43 @@ def test_record_uds_users_host_scoped(db_path):
     ).fetchone()[0]
     conn.close()
     assert count == 2  # one row per host
+
+
+def test_log_spray_attempt_writes_row(db_path):
+    thief.log_spray_attempt(
+        "cucm-a.example.com", "alice", "Summer2025!", 200, None, db_path
+    )
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT cucm_host, username, password, status_code, error "
+        "FROM spray_attempts WHERE username='alice'"
+    ).fetchone()
+    conn.close()
+    assert row == ("cucm-a.example.com", "alice", "Summer2025!", 200, None)
+
+
+def test_log_spray_attempt_records_error_with_null_status(db_path):
+    thief.log_spray_attempt(
+        "cucm-a.example.com", "bob", "Winter2025!", None, "timeout: read timed out", db_path
+    )
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT status_code, error FROM spray_attempts WHERE username='bob'"
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+    assert row[1] == "timeout: read timed out"
+
+
+def test_log_spray_attempt_appends_history(db_path):
+    """No UNIQUE constraint — each call adds a new row, preserving history."""
+    for status in (401, 401, 200):
+        thief.log_spray_attempt(
+            "cucm-a.example.com", "alice", "p", status, None, db_path
+        )
+    conn = sqlite3.connect(db_path)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM spray_attempts WHERE username='alice'"
+    ).fetchone()[0]
+    conn.close()
+    assert count == 3

@@ -638,6 +638,40 @@ def record_uds_users(cucm_host, usernames, db_file='thief.db'):
         return 0
 
 
+def log_spray_attempt(cucm_host, username, password, status_code, error, db_file='thief.db'):
+    """
+    Append a row to spray_attempts. Retries with exponential backoff on
+    SQLite 'database is locked' since worker threads write concurrently.
+    """
+    max_retries = 5
+    retry_delay = 0.1
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_file, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO spray_attempts
+                    (cucm_host, username, password, status_code, error, attempt_time)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (cucm_host, username, password, status_code, error, timestamp))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+                continue
+            if globals().get('debug', False):
+                print(f'[!] log_spray_attempt sqlite error: {e}')
+            return
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] log_spray_attempt error: {e}')
+            return
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
