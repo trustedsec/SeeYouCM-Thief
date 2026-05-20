@@ -150,3 +150,21 @@ class TestExtractConfigsPathTraversal:
         # Nothing escaped output_dir.
         assert not outside.exists()
         assert not (tmp_path / 'evil.txt').exists()
+
+
+class TestExtractConfigsEmptyDb:
+    def test_empty_db_returns_zero_counts(self, tmp_path):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        # Initialize schema but insert no matching rows.
+        thief.init_database(str(db_path))
+
+        written, skipped, errors = thief.extract_configs_from_db(
+            str(db_path), str(out_dir)
+        )
+
+        assert written == 0
+        assert skipped == 0
+        assert errors == 0
+        # output_dir was created even though no files were written.
+        assert out_dir.exists() and out_dir.is_dir()
