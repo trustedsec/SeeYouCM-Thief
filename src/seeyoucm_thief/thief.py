@@ -1404,6 +1404,12 @@ def build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len):
             filename = f'SEP{full_mac}.cnf.xml'
             candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
 
+    # Inject one task per default TFTP file per CUCM so the brute-force
+    # worker pool also pulls XMLDefault.cnf.xml, ITLFile.tlv, etc.
+    for cucm_host in list(candidates_by_cucm.keys()):
+        for default_file in DEFAULT_TFTP_FILES:
+            candidates_by_cucm[cucm_host].add((cucm_host, 'DEFAULT', default_file))
+
     # Randomize per-CUCM, then interleave to distribute load across servers.
     for cucm in candidates_by_cucm:
         candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])

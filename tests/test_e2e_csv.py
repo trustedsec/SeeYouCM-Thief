@@ -51,7 +51,11 @@ def test_end_to_end_csv_export(tmp_path):
         rows = list(reader)
 
     assert rows[0] == ["Timestamp", "Type", "Device", "Username", "Password"]
-    assert len(rows) == 1 + (16 * 3)
+
+    # 16 MAC brute-force tasks × 3 rows each, plus 9 DEFAULT TFTP files each
+    # downloading the test config (2 Credential rows + 1 Username row = 3 rows each).
+    num_default_files = 9  # len(thief.DEFAULT_TFTP_FILES)
+    assert len(rows) == 1 + (16 * 3) + (num_default_files * 3)
 
     timestamp = rows[1][0]
     assert timestamp
@@ -66,6 +70,17 @@ def test_end_to_end_csv_export(tmp_path):
                 [timestamp, "Credential", device, "admin", "pass123"],
                 [timestamp, "Credential", device, "admin", "secret"],
                 [timestamp, "Username", device, "user", "N/A"],
+            ]
+        )
+
+    # DEFAULT sentinel tasks all report under device "SEPDEFAULT"; one entry per
+    # default file since each fetches an independent copy of the test config.
+    for _ in range(num_default_files):
+        expected_data.extend(
+            [
+                [timestamp, "Credential", "SEPDEFAULT", "admin", "pass123"],
+                [timestamp, "Credential", "SEPDEFAULT", "admin", "secret"],
+                [timestamp, "Username", "SEPDEFAULT", "user", "N/A"],
             ]
         )
 

@@ -624,8 +624,8 @@ class TestBuildBruteForceCandidates:
             mac_to_cucm={'00112233445': 'cucm.example'},
             brute_mac_len=1,
         )
-        # 16 SEP files, all on the same CUCM
-        sep_tasks = [c for c in candidates if c[2].startswith('SEP')]
+        # 16 SEP files, all on the same CUCM (exclude DEFAULT sentinel tasks)
+        sep_tasks = [c for c in candidates if c[1] != 'DEFAULT' and c[2].startswith('SEP')]
         assert len(sep_tasks) == 16
         assert {c[0] for c in sep_tasks} == {'cucm.example'}
         # Filenames are SEP<12 hex chars>.cnf.xml
@@ -640,12 +640,40 @@ class TestBuildBruteForceCandidates:
             mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
             brute_mac_len=1,
         )
-        sep_tasks = [c for c in candidates if c[2].startswith('SEP')]
+        # Exclude DEFAULT sentinel tasks; count only MAC-brute-force SEP tasks.
+        sep_tasks = [c for c in candidates if c[1] != 'DEFAULT' and c[2].startswith('SEP')]
         by_cucm = {}
         for cucm, _full_mac, _fname in sep_tasks:
             by_cucm.setdefault(cucm, 0)
             by_cucm[cucm] += 1
         assert by_cucm == {'cucm-a': 16, 'cucm-b': 16}
+
+    def test_includes_one_default_task_per_default_file_per_cucm(self):
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445'],
+            mac_to_cucm={'00112233445': 'cucm.example'},
+            brute_mac_len=1,
+        )
+        default_tasks = [c for c in candidates if c[1] == 'DEFAULT']
+        # One task per default file, on the one CUCM.
+        assert len(default_tasks) == len(thief.DEFAULT_TFTP_FILES)
+        assert {c[2] for c in default_tasks} == set(thief.DEFAULT_TFTP_FILES)
+        assert {c[0] for c in default_tasks} == {'cucm.example'}
+
+    def test_default_tasks_present_for_each_cucm(self):
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445', 'AABBCCDDEEF'],
+            mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
+            brute_mac_len=1,
+        )
+        default_tasks = [c for c in candidates if c[1] == 'DEFAULT']
+        per_cucm = {}
+        for cucm, _, fname in default_tasks:
+            per_cucm.setdefault(cucm, set()).add(fname)
+        assert per_cucm == {
+            'cucm-a': set(thief.DEFAULT_TFTP_FILES),
+            'cucm-b': set(thief.DEFAULT_TFTP_FILES),
+        }
 
 
 # ---------------------------------------------------------------------------
