@@ -625,7 +625,7 @@ class TestBuildBruteForceCandidates:
             brute_mac_len=1,
         )
         # 16 SEP files, all on the same CUCM (exclude DEFAULT sentinel tasks)
-        sep_tasks = [c for c in candidates if c[1] != 'DEFAULT' and c[2].startswith('SEP')]
+        sep_tasks = [c for c in candidates if c[1] != thief.DEFAULT_MAC_SENTINEL and c[2].startswith('SEP')]
         assert len(sep_tasks) == 16
         assert {c[0] for c in sep_tasks} == {'cucm.example'}
         # Filenames are SEP<12 hex chars>.cnf.xml
@@ -641,7 +641,7 @@ class TestBuildBruteForceCandidates:
             brute_mac_len=1,
         )
         # Exclude DEFAULT sentinel tasks; count only MAC-brute-force SEP tasks.
-        sep_tasks = [c for c in candidates if c[1] != 'DEFAULT' and c[2].startswith('SEP')]
+        sep_tasks = [c for c in candidates if c[1] != thief.DEFAULT_MAC_SENTINEL and c[2].startswith('SEP')]
         by_cucm = {}
         for cucm, _full_mac, _fname in sep_tasks:
             by_cucm.setdefault(cucm, 0)
@@ -654,7 +654,7 @@ class TestBuildBruteForceCandidates:
             mac_to_cucm={'00112233445': 'cucm.example'},
             brute_mac_len=1,
         )
-        default_tasks = [c for c in candidates if c[1] == 'DEFAULT']
+        default_tasks = [c for c in candidates if c[1] == thief.DEFAULT_MAC_SENTINEL]
         # One task per default file, on the one CUCM.
         assert len(default_tasks) == len(thief.DEFAULT_TFTP_FILES)
         assert {c[2] for c in default_tasks} == set(thief.DEFAULT_TFTP_FILES)
@@ -666,7 +666,7 @@ class TestBuildBruteForceCandidates:
             mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
             brute_mac_len=1,
         )
-        default_tasks = [c for c in candidates if c[1] == 'DEFAULT']
+        default_tasks = [c for c in candidates if c[1] == thief.DEFAULT_MAC_SENTINEL]
         per_cucm = {}
         for cucm, _, fname in default_tasks:
             per_cucm.setdefault(cucm, set()).add(fname)

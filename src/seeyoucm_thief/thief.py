@@ -44,6 +44,9 @@ DEFAULT_TFTP_FILES = (
     'DistinctiveRingList.xml',
     'jabber-config.xml',
 )
+# Sentinel used in the full_mac slot of brute-force candidate tuples to
+# identify default-file tasks (not associated with a specific device MAC).
+DEFAULT_MAC_SENTINEL = 'DEFAULT'
 # Global variables
 debug = False
 found_credentials = []
@@ -1408,7 +1411,7 @@ def build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len):
     # worker pool also pulls XMLDefault.cnf.xml, ITLFile.tlv, etc.
     for cucm_host in list(candidates_by_cucm.keys()):
         for default_file in DEFAULT_TFTP_FILES:
-            candidates_by_cucm[cucm_host].add((cucm_host, 'DEFAULT', default_file))
+            candidates_by_cucm[cucm_host].add((cucm_host, DEFAULT_MAC_SENTINEL, default_file))
 
     # Randomize per-CUCM, then interleave to distribute load across servers.
     for cucm in candidates_by_cucm:
