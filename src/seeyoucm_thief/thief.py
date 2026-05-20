@@ -1444,6 +1444,88 @@ def device_key_for_result(full_mac, filename):
     return f'SEP{full_mac}'
 
 
+def extract_configs_from_db(db_file, output_dir, debug=False):
+    """Read successful download rows from the cache and materialize them
+    as files under output_dir/<cucm_host>/<filename>.
+
+    Returns (written, skipped, errors) counts.
+
+    - written: files newly created from DB content.
+    - skipped: target file already existed; left untouched.
+    - errors: row was rejected (path-traversal sanitization, write failure).
+
+    Raises FileNotFoundError if db_file does not exist. Other DB-level
+    failures (locked, schema mismatch) propagate as sqlite3 errors.
+    """
+    if not os.path.exists(db_file):
+        raise FileNotFoundError(f'Database file not found: {db_file}')
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT cucm_host, filename, content
+        FROM download_attempts
+        WHERE success = 1
+          AND content IS NOT NULL
+          AND length(content) > 0
+        ORDER BY cucm_host, filename
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    written = 0
+    skipped = 0
+    errors = 0
+    skipped_paths = []
+    error_paths = []
+
+    print(f'[*] Extracting configs from {db_file} to {output_dir}/')
+    print(f'[*] Found {len(rows)} rows with non-empty content')
+
+    for cucm_host, filename, content in rows:
+        safe_cucm = os.path.basename(cucm_host or '')
+        safe_filename = os.path.basename(filename or '')
+        if not safe_cucm or not safe_filename or safe_cucm != cucm_host or safe_filename != filename:
+            errors += 1
+            error_paths.append(f'{cucm_host}/{filename} (path-traversal guard)')
+            continue
+
+        cucm_dir = os.path.join(output_dir, safe_cucm)
+        target_path = os.path.join(cucm_dir, safe_filename)
+
+        if os.path.exists(target_path):
+            skipped += 1
+            skipped_paths.append(target_path)
+            continue
+
+        try:
+            os.makedirs(cucm_dir, exist_ok=True)
+            with open(target_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            if debug:
+                print(f'[+] Wrote {target_path}')
+            written += 1
+        except OSError as e:
+            errors += 1
+            error_paths.append(f'{target_path}: {e}')
+
+    if skipped_paths:
+        print(f'[!] Skipped {skipped} files (already exist):')
+        for p in skipped_paths:
+            print(f'    {p}')
+
+    if error_paths:
+        print(f'[!] Errors on {errors} rows:')
+        for p in error_paths:
+            print(f'    {p}')
+
+    print(f'[*] Done: {written} written, {skipped} skipped, {errors} errors')
+
+    return written, skipped, errors
+
+
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
