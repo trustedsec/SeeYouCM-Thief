@@ -446,7 +446,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        index, mac, content, method, cached = results[0]
+        index, mac, filename, content, method, cached = results[0]
         assert content == "config-content"
         assert method == 'TFTP'
 
@@ -459,7 +459,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        _, _, content, method, _ = results[0]
+        _, _, _, content, method, _ = results[0]
         assert content == "http-content"
         assert method == 'HTTP'
 
@@ -498,7 +498,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        _, _, content, _, _ = results[0]
+        _, _, _, content, _, _ = results[0]
         assert content is None
 
     def test_no_cucm_returns_no_cucm(self, monkeypatch):
@@ -506,7 +506,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", None)])
 
         assert len(results) == 1
-        _, _, content, method, _ = results[0]
+        _, _, _, content, method, _ = results[0]
         assert content is None
         assert method == 'NO_CUCM'
 
@@ -530,7 +530,7 @@ class TestDownloadWorker:
         t.join(timeout=5)
 
         result = results_queue.get_nowait()
-        assert result[3] == 'CUCM_DEAD'
+        assert result[4] == 'CUCM_DEAD'
 
     def test_multiple_tasks_processed(self, monkeypatch):
         monkeypatch.setattr(thief, 'download_config_tftp', lambda *a, **kw: "content")
@@ -698,3 +698,158 @@ class TestDefaultTftpFiles:
     def test_constant_is_tuple(self):
         # Tuple, not list — these are an immutable constant.
         assert isinstance(thief.DEFAULT_TFTP_FILES, tuple)
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_MAC_SENTINEL guard in download_worker results
+# ---------------------------------------------------------------------------
+
+class TestDefaultSentinelResultsGuard:
+    """Tests that DEFAULT_MAC_SENTINEL results are handled correctly by
+    download_worker and that the results-consumption logic properly separates
+    default-file tasks from real-MAC tasks."""
+
+    def _run_worker_single(self, monkeypatch, full_mac, filename, cucm,
+                           content_return):
+        """Run the worker for one task and return the single result tuple."""
+        monkeypatch.setattr(thief, 'download_config_tftp',
+                            lambda *a, **kw: content_return)
+        monkeypatch.setattr(thief, 'download_config_http', lambda *a, **kw: None)
+
+        work_queue = queue.Queue()
+        results_queue = queue.Queue()
+        manager = thief.TFTPBackoffManager()
+
+        work_queue.put((0, full_mac, filename, cucm))
+        work_queue.put(None)
+
+        t = threading.Thread(
+            target=thief.download_worker,
+            args=(work_queue, results_queue, None, True, manager,
+                  True, 'ignored.db', True, set(), threading.Lock()),
+            daemon=True,
+        )
+        t.start()
+        work_queue.join()
+        t.join(timeout=5)
+
+        return results_queue.get_nowait()
+
+    def test_worker_returns_filename_in_result_tuple(self, monkeypatch):
+        """Worker result tuple must include filename so consumer can key
+        default-file results correctly."""
+        result = self._run_worker_single(
+            monkeypatch,
+            full_mac=thief.DEFAULT_MAC_SENTINEL,
+            filename='XMLDefault.cnf.xml',
+            cucm='cucm.example',
+            content_return='<device/>',
+        )
+        # New tuple shape: (index, full_mac, filename, content, method, was_cached)
+        assert len(result) == 6
+        index, full_mac, filename, content, method, was_cached = result
+        assert full_mac == thief.DEFAULT_MAC_SENTINEL
+        assert filename == 'XMLDefault.cnf.xml'
+        assert content == '<device/>'
+
+    def test_default_full_mac_does_not_pollute_found_macs(self, monkeypatch):
+        """Simulates the results-consumption logic: DEFAULT sentinel must NOT
+        be appended to found_macs."""
+        found_macs = []
+        all_configs = []
+
+        # Simulate the consumption of one DEFAULT result
+        full_mac = thief.DEFAULT_MAC_SENTINEL
+        filename = 'XMLDefault.cnf.xml'
+        content = '<device><sshUserId>admin</sshUserId></device>'
+
+        if content:
+            if full_mac == thief.DEFAULT_MAC_SENTINEL:
+                device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+            else:
+                device_key = f'SEP{full_mac}'
+                found_macs.append(full_mac)
+            all_configs.append((device_key, content))
+
+        assert thief.DEFAULT_MAC_SENTINEL not in found_macs
+        assert 'DEFAULT' not in found_macs
+        assert all_configs == [('XMLDefault', content)]
+
+    def test_default_full_mac_logs_credentials_under_filename(self, monkeypatch):
+        """Credentials extracted from a default file must be keyed by the
+        filename (with .cnf.xml stripped), not by 'SEPDEFAULT'."""
+        full_mac = thief.DEFAULT_MAC_SENTINEL
+        filename = 'XMLDefault.cnf.xml'
+        content = (
+            '<device>\n'
+            '<sshUserId>admin</sshUserId>\n'
+            '<sshPassword>pass123</sshPassword>\n'
+            '</device>'
+        )
+
+        if full_mac == thief.DEFAULT_MAC_SENTINEL:
+            device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+        else:
+            device_key = f'SEP{full_mac}'
+
+        config_creds = []
+        config_users = []
+        user = ''
+
+        import re
+        for line in content.split('\n'):
+            match = re.search(
+                r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>'
+                r'|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>'
+                r'|<phonePassword>(\S+)</phonePassword>)',
+                line,
+            )
+            if match:
+                if match.group(2):
+                    user = match.group(2)
+                    config_users.append((user, device_key))
+                if match.group(3):
+                    config_creds.append((user, match.group(3), device_key))
+
+        assert config_users == [('admin', 'XMLDefault')]
+        assert config_creds == [('admin', 'pass123', 'XMLDefault')]
+        # Confirm no SEPDEFAULT anywhere
+        for _, _, dev in config_creds:
+            assert dev != 'SEPDEFAULT'
+        for _, dev in config_users:
+            assert dev != 'SEPDEFAULT'
+
+    def test_real_mac_full_mac_unaffected(self, monkeypatch):
+        """For a real 12-hex-char MAC, device_key must be SEP<mac> and the
+        mac must be appended to found_macs, unchanged from prior behaviour."""
+        found_macs = []
+        all_configs = []
+
+        full_mac = '001122334455'
+        filename = 'SEP001122334455.cnf.xml'
+        content = '<device><sshUserId>user</sshUserId></device>'
+
+        if content:
+            if full_mac == thief.DEFAULT_MAC_SENTINEL:
+                device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+            else:
+                device_key = f'SEP{full_mac}'
+                found_macs.append(full_mac)
+            all_configs.append((device_key, content))
+
+        assert found_macs == ['001122334455']
+        assert all_configs == [('SEP001122334455', content)]
+
+    def test_non_cnf_xml_default_filename_kept_as_is(self, monkeypatch):
+        """Default files that don't end in .cnf.xml (e.g., ITLFile.tlv) must
+        keep their full name as the device key."""
+        full_mac = thief.DEFAULT_MAC_SENTINEL
+        filename = 'ITLFile.tlv'
+        content = '<tlv/>'
+
+        if full_mac == thief.DEFAULT_MAC_SENTINEL:
+            device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+        else:
+            device_key = f'SEP{full_mac}'
+
+        assert device_key == 'ITLFile.tlv'

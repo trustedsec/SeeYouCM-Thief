@@ -45,7 +45,7 @@ def test_download_worker_uses_task_cucm(monkeypatch):
     work_queue.put(None)
     work_queue.join()
 
-    index, full_mac, content, method, was_cached = results_queue.get(timeout=2)
+    index, full_mac, filename, content, method, was_cached = results_queue.get(timeout=2)
     assert index == 0
     assert full_mac == "ABCDEF123456"
     assert content == "content"
@@ -77,8 +77,9 @@ def test_download_worker_tftp_timeouts_and_errors(monkeypatch):
     work_queue.join()
 
     # Both results should be failures and backoff should increase.
+    # Result tuple: (index, full_mac, filename, content, method, was_cached)
     res1 = results_queue.get(timeout=2)
     res2 = results_queue.get(timeout=2)
-    assert res1[2] is None
-    assert res2[2] is None
+    assert res1[3] is None
+    assert res2[3] is None
     assert manager.get_delay() >= 0

@@ -75,14 +75,15 @@ def test_end_to_end_csv_export(tmp_path):
             ]
         )
 
-    # DEFAULT sentinel tasks all report under device "SEPDEFAULT"; one entry per
-    # default file since each fetches an independent copy of the test config.
-    for _ in range(num_default_files):
+    # DEFAULT sentinel tasks report under a device key derived from the filename
+    # (with .cnf.xml stripped, or the full name for non-.cnf.xml files).
+    for default_file in thief.DEFAULT_TFTP_FILES:
+        device_key = default_file[:-8] if default_file.endswith('.cnf.xml') else default_file
         expected_data.extend(
             [
-                [timestamp, "Credential", "SEPDEFAULT", "admin", "pass123"],
-                [timestamp, "Credential", "SEPDEFAULT", "admin", "secret"],
-                [timestamp, "Username", "SEPDEFAULT", "user", "N/A"],
+                [timestamp, "Credential", device_key, "admin", "pass123"],
+                [timestamp, "Credential", device_key, "admin", "secret"],
+                [timestamp, "Username", device_key, "user", "N/A"],
             ]
         )
 
