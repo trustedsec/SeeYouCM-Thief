@@ -1951,22 +1951,7 @@ def main():
                     sys.stdout.flush()
                 except (ValueError, AttributeError):
                     pass
-        
-        # Wait for all queued work to be completed
-        try:
-            print(f'\n[*] Waiting for all workers to finish processing...')
-            sys.stdout.flush()
-        except (ValueError, AttributeError):
-            pass
-        
-        work_queue.join()
-        
-        try:
-            print(f'[*] All tasks completed!')
-            sys.stdout.flush()
-        except (ValueError, AttributeError):
-            pass
-        
+
         # Print summary
         if found_macs:
             mac_list = ', '.join([f"SEP{mac}" for mac in found_macs[:10]])
