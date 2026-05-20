@@ -92,3 +92,27 @@ class TestExtractConfigsFilter:
         assert not (out_dir / '10.0.1.5' / 'FAIL.cnf.xml').exists()
         assert not (out_dir / '10.0.1.5' / 'NULL.cnf.xml').exists()
         assert not (out_dir / '10.0.1.5' / 'EMPTY.cnf.xml').exists()
+
+
+class TestExtractConfigsSkipExisting:
+    def test_existing_file_is_left_untouched(self, tmp_path):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        _make_db_with_rows(db_path, [
+            {'cucm_host': '10.0.1.5', 'filename': 'SEP1.cnf.xml',
+             'success': 1, 'content': '<xml>from-db</xml>'},
+        ])
+        # Pre-create the target file with different content.
+        target = out_dir / '10.0.1.5' / 'SEP1.cnf.xml'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('manually-edited')
+
+        written, skipped, errors = thief.extract_configs_from_db(
+            str(db_path), str(out_dir)
+        )
+
+        assert written == 0
+        assert skipped == 1
+        assert errors == 0
+        # The manually-edited content must NOT be overwritten.
+        assert target.read_text() == 'manually-edited'
