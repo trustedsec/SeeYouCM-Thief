@@ -210,3 +210,60 @@ class TestExtractConfigsDebugLogging:
         captured = capsys.readouterr()
         assert '[+] Wrote' in captured.out
         assert 'SEP1.cnf.xml' in captured.out
+
+
+class TestExtractConfigsCli:
+    def test_cli_extracts_files(self, tmp_path):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        _make_db_with_rows(db_path, [
+            {'cucm_host': '10.0.1.5', 'filename': 'CLI1.cnf.xml',
+             'success': 1, 'content': '<xml>cli-1</xml>'},
+            {'cucm_host': '10.0.1.6', 'filename': 'CLI2.cnf.xml',
+             'success': 1, 'content': '<xml>cli-2</xml>'},
+        ])
+
+        result = subprocess.run(
+            [sys.executable, 'thief.py',
+             '--db', str(db_path),
+             '--extract-configs', str(out_dir)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (out_dir / '10.0.1.5' / 'CLI1.cnf.xml').read_text() == '<xml>cli-1</xml>'
+        assert (out_dir / '10.0.1.6' / 'CLI2.cnf.xml').read_text() == '<xml>cli-2</xml>'
+        assert 'Done: 2 written' in result.stdout
+
+    def test_cli_rejects_no_db_combo(self, tmp_path):
+        out_dir = tmp_path / 'configs'
+
+        result = subprocess.run(
+            [sys.executable, 'thief.py',
+             '--no-db',
+             '--extract-configs', str(out_dir)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+
+        assert result.returncode != 0
+        combined = result.stdout + result.stderr
+        assert '--no-db' in combined or 'no-db' in combined
+        assert not out_dir.exists()
+
+    def test_cli_missing_db_exits_nonzero(self, tmp_path):
+        out_dir = tmp_path / 'configs'
+        missing_db = tmp_path / 'nope.db'
+
+        result = subprocess.run(
+            [sys.executable, 'thief.py',
+             '--db', str(missing_db),
+             '--extract-configs', str(out_dir)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+
+        assert result.returncode != 0
+        combined = result.stdout + result.stderr
+        assert 'nope.db' in combined or 'not found' in combined.lower()

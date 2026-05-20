@@ -1561,7 +1561,8 @@ def main():
     parser.add_argument('--db', type=str, metavar='FILENAME', default='thief.db', help='Specify SQLite database for caching results (default: thief.db)')
     parser.add_argument('--no-db', action='store_true', default=False, help='Disable database caching and operate without persistent storage')
     parser.add_argument('--show-db', action='store_true', default=False, help='Display summary of credentials stored in database and exit')
-    
+    parser.add_argument('--extract-configs', type=str, metavar='DIR', default=None, help='Extract all cached configuration files from the database into DIR/<cucm_host>/<filename> and exit')
+
     # Debugging
     parser.add_argument('-d','--debug', action='store_true', default=False, help='Enable verbose output including all failed attempts and TFTP operations')
 
@@ -1606,6 +1607,23 @@ def main():
                 print(f'[-] Error exporting credentials to CSV: {e}')
         display_database_summary(db_file, cucm_filter)
         quit(0)
+
+    # Handle --extract-configs (dump cached configs to disk and exit)
+    if args.extract_configs:
+        if args.no_db:
+            print('[-] --extract-configs requires the database (cannot be combined with --no-db)')
+            quit(1)
+        try:
+            written, skipped, errors = extract_configs_from_db(
+                args.db, args.extract_configs, debug=args.debug
+            )
+        except FileNotFoundError as e:
+            print(f'[-] {e}')
+            print('[-] Run a scan first to populate the database, or point --db at an existing file.')
+            quit(1)
+        # Per spec: exit 1 if any row failed to write. Empty DB (0 rows, 0
+        # errors) is a legitimate clean exit.
+        quit(1 if errors > 0 else 0)
 
     CUCM_host = args.host
     phones = args.phone if args.phone else []
