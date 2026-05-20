@@ -84,6 +84,17 @@ View cached results:
 ./thief.py --show-db -H <CUCM Server>  # Filter by CUCM
 ```
 
+Extract all cached configs to disk for offline review:
+
+```bash
+./thief.py --extract-configs ./configs
+./thief.py --extract-configs ./configs --db custom.db
+```
+
+Files are written to `./configs/<cucm_host>/<filename>`. Existing files are
+preserved (re-runs are safe and incremental). Only successful downloads
+with non-empty content are extracted.
+
 Force re-download (bypass cache):
 
 ```bash
@@ -134,6 +145,7 @@ Export to CSV:
 - `--db FILENAME`: Specify SQLite database for caching results (default: thief.db)
 - `--no-db`: Disable database caching and operate without persistent storage
 - `--show-db`: Display summary of credentials stored in database and exit
+- `--extract-configs DIR`: Extract all cached configuration files from the database into `DIR/<cucm_host>/<filename>` and exit
 
 ### Debugging
 - `-d, --debug`: Enable verbose output including all failed attempts and TFTP operations

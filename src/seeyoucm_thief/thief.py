@@ -1570,6 +1570,8 @@ def main():
 
     # Handle --show-db early (display database summary and exit)
     if args.show_db:
+        if args.extract_configs is not None:
+            print('[!] --extract-configs ignored because --show-db takes precedence')
         db_file = args.db
         cucm_filter = args.host
         if args.csv:
@@ -1609,7 +1611,7 @@ def main():
         quit(0)
 
     # Handle --extract-configs (dump cached configs to disk and exit)
-    if args.extract_configs:
+    if args.extract_configs is not None:
         if args.no_db:
             print('[-] --extract-configs requires the database (cannot be combined with --no-db)')
             quit(1)
