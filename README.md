@@ -150,6 +150,22 @@ Export to CSV:
 5. **Credential Extraction**: Parses XML configs for SSH credentials, passwords, usernames
 6. **Database Storage**: Caches all results to prevent redundant requests
 
+### Default TFTP File Enumeration
+
+In addition to per-device `SEP<MAC>.cnf.xml` files, the tool always attempts to pull these well-known CUCM default files from each discovered TFTP server — no extra flag required:
+
+- `XMLDefault.cnf.xml`
+- `SEPDefault.cnf.xml`
+- `SIPDefault.cnf`
+- `ITLFile.tlv`
+- `CTLFile.tlv`
+- `RingList.xml`
+- `Ringlist-wb.xml`
+- `DistinctiveRingList.xml`
+- `jabber-config.xml`
+
+These can surface firmware versions, trust-list presence, Jabber bootstrap configuration, and other recon-relevant metadata. Results are cached in the SQLite database and visible via `--show-db`. Credentials found in default files are keyed by filename (e.g. `XMLDefault`, `ITLFile.tlv`) rather than a device MAC address.
+
 ## Setup
 
 ### Using uv (recommended)

@@ -446,7 +446,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        index, mac, content, method, cached = results[0]
+        index, mac, filename, content, method, cached = results[0]
         assert content == "config-content"
         assert method == 'TFTP'
 
@@ -459,7 +459,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        _, _, content, method, _ = results[0]
+        _, _, _, content, method, _ = results[0]
         assert content == "http-content"
         assert method == 'HTTP'
 
@@ -498,7 +498,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", "10.0.0.1")])
 
         assert len(results) == 1
-        _, _, content, _, _ = results[0]
+        _, _, _, content, _, _ = results[0]
         assert content is None
 
     def test_no_cucm_returns_no_cucm(self, monkeypatch):
@@ -506,7 +506,7 @@ class TestDownloadWorker:
             [(0, "001122334455", "SEP001122334455.cnf.xml", None)])
 
         assert len(results) == 1
-        _, _, content, method, _ = results[0]
+        _, _, _, content, method, _ = results[0]
         assert content is None
         assert method == 'NO_CUCM'
 
@@ -530,7 +530,7 @@ class TestDownloadWorker:
         t.join(timeout=5)
 
         result = results_queue.get_nowait()
-        assert result[3] == 'CUCM_DEAD'
+        assert result[4] == 'CUCM_DEAD'
 
     def test_multiple_tasks_processed(self, monkeypatch):
         monkeypatch.setattr(thief, 'download_config_tftp', lambda *a, **kw: "content")
@@ -555,22 +555,25 @@ class TestDownloadWorker:
 class TestGetConfigNames:
     def test_returns_filenames_for_hostnames(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_strips_domain_from_hostnames(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455.example.com'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_already_has_extension(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455.cnf.xml'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_empty_hostnames_falls_back_to_cache_list(self, monkeypatch):
-        # With no hostnames, get_config_names now falls back to fetching
-        # ConfigFileCacheList.txt from the CUCM TFTP service.
+        # With no hostnames and empty cache list, get_config_names returns defaults.
         monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [])
         result = thief.get_config_names('10.0.0.1', hostnames=[])
-        assert result == []
+        # No per-device entries, but defaults are always appended.
+        assert set(result) == set(thief.DEFAULT_TFTP_FILES)
 
     def test_none_hostnames_falls_back_to_cache_list(self, monkeypatch):
         monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [
@@ -579,4 +582,181 @@ class TestGetConfigNames:
             'RingList.xml',
         ])
         result = thief.get_config_names('10.0.0.1', hostnames=None)
-        assert result == ['SEPAABBCCDDEEFF.cnf.xml']
+        assert 'SEPAABBCCDDEEFF.cnf.xml' in result
+
+    def test_hostnames_path_includes_defaults_after_per_device(self):
+        result = thief.get_config_names('cucm.example', hostnames=['SEPABC123456789'])
+        # Per-device filename comes first.
+        assert result[0] == 'SEPABC123456789.cnf.xml'
+        # All defaults appear, in declared order, after per-device entries.
+        defaults_in_result = [f for f in result if f in thief.DEFAULT_TFTP_FILES]
+        assert defaults_in_result == list(thief.DEFAULT_TFTP_FILES)
+
+    def test_hostnames_path_dedupes_when_hostname_collides_with_default(self):
+        # If a caller happens to pass a hostname matching a default, the result
+        # should still contain that name exactly once.
+        result = thief.get_config_names('cucm.example', hostnames=['XMLDefault'])
+        assert result.count('XMLDefault.cnf.xml') == 1
+
+    def test_empty_hostnames_none_falls_back_to_cache_list_with_defaults(self, monkeypatch):
+        monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: ['SEP111111111111.cnf.xml'])
+        result = thief.get_config_names('cucm.example', hostnames=None)
+        assert 'SEP111111111111.cnf.xml' in result
+        for default in thief.DEFAULT_TFTP_FILES:
+            assert default in result
+
+    def test_no_hostnames_no_cucm_returns_only_defaults(self):
+        # Previous behavior: returned []. New behavior: still return defaults,
+        # since they're attempted unconditionally.
+        result = thief.get_config_names(None, hostnames=None)
+        assert set(result) == set(thief.DEFAULT_TFTP_FILES)
+
+
+# ---------------------------------------------------------------------------
+# build_brute_force_candidates
+# ---------------------------------------------------------------------------
+
+class TestBuildBruteForceCandidates:
+    def test_one_candidate_per_suffix_per_prefix(self):
+        # Suffix length 1 => 16 candidates per prefix.
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['001122334455'[:11]],  # 11-char prefix
+            mac_to_cucm={'00112233445': 'cucm.example'},
+            brute_mac_len=1,
+        )
+        # 16 SEP files, all on the same CUCM (exclude DEFAULT sentinel tasks)
+        sep_tasks = [c for c in candidates if c[1] != thief.DEFAULT_MAC_SENTINEL and c[2].startswith('SEP')]
+        assert len(sep_tasks) == 16
+        assert {c[0] for c in sep_tasks} == {'cucm.example'}
+        # Filenames are SEP<12 hex chars>.cnf.xml
+        for cucm, full_mac, fname in sep_tasks:
+            assert fname == f'SEP{full_mac}.cnf.xml'
+            assert len(full_mac) == 12
+
+    def test_groups_by_cucm(self):
+        # Two prefixes, different CUCMs.
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445', 'AABBCCDDEEF'],
+            mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
+            brute_mac_len=1,
+        )
+        # Exclude DEFAULT sentinel tasks; count only MAC-brute-force SEP tasks.
+        sep_tasks = [c for c in candidates if c[1] != thief.DEFAULT_MAC_SENTINEL and c[2].startswith('SEP')]
+        by_cucm = {}
+        for cucm, _full_mac, _fname in sep_tasks:
+            by_cucm.setdefault(cucm, 0)
+            by_cucm[cucm] += 1
+        assert by_cucm == {'cucm-a': 16, 'cucm-b': 16}
+
+    def test_includes_one_default_task_per_default_file_per_cucm(self):
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445'],
+            mac_to_cucm={'00112233445': 'cucm.example'},
+            brute_mac_len=1,
+        )
+        default_tasks = [c for c in candidates if c[1] == thief.DEFAULT_MAC_SENTINEL]
+        # One task per default file, on the one CUCM.
+        assert len(default_tasks) == len(thief.DEFAULT_TFTP_FILES)
+        assert {c[2] for c in default_tasks} == set(thief.DEFAULT_TFTP_FILES)
+        assert {c[0] for c in default_tasks} == {'cucm.example'}
+
+    def test_default_tasks_present_for_each_cucm(self):
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445', 'AABBCCDDEEF'],
+            mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
+            brute_mac_len=1,
+        )
+        default_tasks = [c for c in candidates if c[1] == thief.DEFAULT_MAC_SENTINEL]
+        per_cucm = {}
+        for cucm, _, fname in default_tasks:
+            per_cucm.setdefault(cucm, set()).add(fname)
+        assert per_cucm == {
+            'cucm-a': set(thief.DEFAULT_TFTP_FILES),
+            'cucm-b': set(thief.DEFAULT_TFTP_FILES),
+        }
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_TFTP_FILES constant
+# ---------------------------------------------------------------------------
+
+class TestDefaultTftpFiles:
+    def test_constant_contains_expected_files(self):
+        expected = {
+            'XMLDefault.cnf.xml',
+            'SEPDefault.cnf.xml',
+            'SIPDefault.cnf',
+            'ITLFile.tlv',
+            'CTLFile.tlv',
+            'RingList.xml',
+            'Ringlist-wb.xml',
+            'DistinctiveRingList.xml',
+            'jabber-config.xml',
+        }
+        assert set(thief.DEFAULT_TFTP_FILES) == expected
+
+    def test_constant_is_tuple(self):
+        # Tuple, not list — these are an immutable constant.
+        assert isinstance(thief.DEFAULT_TFTP_FILES, tuple)
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_MAC_SENTINEL guard in download_worker results
+# ---------------------------------------------------------------------------
+
+class TestDefaultSentinelResultsGuard:
+    """Tests that DEFAULT_MAC_SENTINEL results are handled correctly by
+    download_worker and that the results-consumption logic properly separates
+    default-file tasks from real-MAC tasks."""
+
+    def _run_worker_single(self, monkeypatch, full_mac, filename, cucm,
+                           content_return):
+        """Run the worker for one task and return the single result tuple."""
+        monkeypatch.setattr(thief, 'download_config_tftp',
+                            lambda *a, **kw: content_return)
+        monkeypatch.setattr(thief, 'download_config_http', lambda *a, **kw: None)
+
+        work_queue = queue.Queue()
+        results_queue = queue.Queue()
+        manager = thief.TFTPBackoffManager()
+
+        work_queue.put((0, full_mac, filename, cucm))
+        work_queue.put(None)
+
+        t = threading.Thread(
+            target=thief.download_worker,
+            args=(work_queue, results_queue, None, True, manager,
+                  True, 'ignored.db', True, set(), threading.Lock()),
+            daemon=True,
+        )
+        t.start()
+        work_queue.join()
+        t.join(timeout=5)
+
+        return results_queue.get_nowait()
+
+    def test_worker_returns_filename_in_result_tuple(self, monkeypatch):
+        """Worker result tuple must include filename so consumer can key
+        default-file results correctly."""
+        result = self._run_worker_single(
+            monkeypatch,
+            full_mac=thief.DEFAULT_MAC_SENTINEL,
+            filename='XMLDefault.cnf.xml',
+            cucm='cucm.example',
+            content_return='<device/>',
+        )
+        # New tuple shape: (index, full_mac, filename, content, method, was_cached)
+        assert len(result) == 6
+        index, full_mac, filename, content, method, was_cached = result
+        assert full_mac == thief.DEFAULT_MAC_SENTINEL
+        assert filename == 'XMLDefault.cnf.xml'
+        assert content == '<device/>'
+
+    def test_device_key_for_real_mac(self):
+        assert thief.device_key_for_result('AABBCCDDEEFF', 'SEPAABBCCDDEEFF.cnf.xml') == 'SEPAABBCCDDEEFF'
+
+    def test_device_key_for_default_cnf_xml_strips_extension(self):
+        assert thief.device_key_for_result(thief.DEFAULT_MAC_SENTINEL, 'XMLDefault.cnf.xml') == 'XMLDefault'
+
+    def test_device_key_for_default_non_cnf_xml_kept_as_is(self):
+        assert thief.device_key_for_result(thief.DEFAULT_MAC_SENTINEL, 'ITLFile.tlv') == 'ITLFile.tlv'
