@@ -60,3 +60,35 @@ class TestExtractConfigsHappyPath:
         assert (out_dir / '10.0.1.5' / 'SEPAABBCC112233.cnf.xml').read_text() == '<xml>device-a</xml>'
         assert (out_dir / '10.0.1.5' / 'XMLDefault.cnf.xml').read_text() == '<xml>default-a</xml>'
         assert (out_dir / '10.0.1.6' / 'SEPAABBCC445566.cnf.xml').read_text() == '<xml>device-b</xml>'
+
+
+class TestExtractConfigsFilter:
+    def test_skips_failures_null_and_empty_content(self, tmp_path):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        _make_db_with_rows(db_path, [
+            # Should be written
+            {'cucm_host': '10.0.1.5', 'filename': 'KEEP1.cnf.xml',
+             'success': 1, 'content': '<xml>keep</xml>'},
+            # success=0 — must be skipped even if content is present
+            {'cucm_host': '10.0.1.5', 'filename': 'FAIL.cnf.xml',
+             'success': 0, 'content': '<xml>should-not-write</xml>'},
+            # content is NULL — must be skipped
+            {'cucm_host': '10.0.1.5', 'filename': 'NULL.cnf.xml',
+             'success': 1, 'content': None},
+            # content is empty string — must be skipped
+            {'cucm_host': '10.0.1.5', 'filename': 'EMPTY.cnf.xml',
+             'success': 1, 'content': ''},
+        ])
+
+        written, skipped, errors = thief.extract_configs_from_db(
+            str(db_path), str(out_dir)
+        )
+
+        assert written == 1
+        assert skipped == 0
+        assert errors == 0
+        assert (out_dir / '10.0.1.5' / 'KEEP1.cnf.xml').exists()
+        assert not (out_dir / '10.0.1.5' / 'FAIL.cnf.xml').exists()
+        assert not (out_dir / '10.0.1.5' / 'NULL.cnf.xml').exists()
+        assert not (out_dir / '10.0.1.5' / 'EMPTY.cnf.xml').exists()
