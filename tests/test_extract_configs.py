@@ -181,3 +181,32 @@ class TestExtractConfigsMissingDb:
         assert 'does-not-exist.db' in str(excinfo.value)
         # output_dir should NOT have been created when the DB is missing.
         assert not out_dir.exists()
+
+
+class TestExtractConfigsDebugLogging:
+    def test_per_file_lines_only_in_debug_mode(self, tmp_path, capsys):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        _make_db_with_rows(db_path, [
+            {'cucm_host': '10.0.1.5', 'filename': 'SEP1.cnf.xml',
+             'success': 1, 'content': '<xml>a</xml>'},
+        ])
+
+        # Default mode: no per-file [+] Wrote lines.
+        thief.extract_configs_from_db(str(db_path), str(out_dir), debug=False)
+        captured = capsys.readouterr()
+        assert '[+] Wrote' not in captured.out
+        assert 'Done: 1 written' in captured.out
+
+    def test_per_file_lines_emitted_with_debug(self, tmp_path, capsys):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        _make_db_with_rows(db_path, [
+            {'cucm_host': '10.0.1.5', 'filename': 'SEP1.cnf.xml',
+             'success': 1, 'content': '<xml>a</xml>'},
+        ])
+
+        thief.extract_configs_from_db(str(db_path), str(out_dir), debug=True)
+        captured = capsys.readouterr()
+        assert '[+] Wrote' in captured.out
+        assert 'SEP1.cnf.xml' in captured.out
