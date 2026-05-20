@@ -752,104 +752,11 @@ class TestDefaultSentinelResultsGuard:
         assert filename == 'XMLDefault.cnf.xml'
         assert content == '<device/>'
 
-    def test_default_full_mac_does_not_pollute_found_macs(self, monkeypatch):
-        """Simulates the results-consumption logic: DEFAULT sentinel must NOT
-        be appended to found_macs."""
-        found_macs = []
-        all_configs = []
+    def test_device_key_for_real_mac(self):
+        assert thief.device_key_for_result('AABBCCDDEEFF', 'SEPAABBCCDDEEFF.cnf.xml') == 'SEPAABBCCDDEEFF'
 
-        # Simulate the consumption of one DEFAULT result
-        full_mac = thief.DEFAULT_MAC_SENTINEL
-        filename = 'XMLDefault.cnf.xml'
-        content = '<device><sshUserId>admin</sshUserId></device>'
+    def test_device_key_for_default_cnf_xml_strips_extension(self):
+        assert thief.device_key_for_result(thief.DEFAULT_MAC_SENTINEL, 'XMLDefault.cnf.xml') == 'XMLDefault'
 
-        if content:
-            if full_mac == thief.DEFAULT_MAC_SENTINEL:
-                device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-            else:
-                device_key = f'SEP{full_mac}'
-                found_macs.append(full_mac)
-            all_configs.append((device_key, content))
-
-        assert thief.DEFAULT_MAC_SENTINEL not in found_macs
-        assert 'DEFAULT' not in found_macs
-        assert all_configs == [('XMLDefault', content)]
-
-    def test_default_full_mac_logs_credentials_under_filename(self, monkeypatch):
-        """Credentials extracted from a default file must be keyed by the
-        filename (with .cnf.xml stripped), not by 'SEPDEFAULT'."""
-        full_mac = thief.DEFAULT_MAC_SENTINEL
-        filename = 'XMLDefault.cnf.xml'
-        content = (
-            '<device>\n'
-            '<sshUserId>admin</sshUserId>\n'
-            '<sshPassword>pass123</sshPassword>\n'
-            '</device>'
-        )
-
-        if full_mac == thief.DEFAULT_MAC_SENTINEL:
-            device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-        else:
-            device_key = f'SEP{full_mac}'
-
-        config_creds = []
-        config_users = []
-        user = ''
-
-        import re
-        for line in content.split('\n'):
-            match = re.search(
-                r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>'
-                r'|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>'
-                r'|<phonePassword>(\S+)</phonePassword>)',
-                line,
-            )
-            if match:
-                if match.group(2):
-                    user = match.group(2)
-                    config_users.append((user, device_key))
-                if match.group(3):
-                    config_creds.append((user, match.group(3), device_key))
-
-        assert config_users == [('admin', 'XMLDefault')]
-        assert config_creds == [('admin', 'pass123', 'XMLDefault')]
-        # Confirm no SEPDEFAULT anywhere
-        for _, _, dev in config_creds:
-            assert dev != 'SEPDEFAULT'
-        for _, dev in config_users:
-            assert dev != 'SEPDEFAULT'
-
-    def test_real_mac_full_mac_unaffected(self, monkeypatch):
-        """For a real 12-hex-char MAC, device_key must be SEP<mac> and the
-        mac must be appended to found_macs, unchanged from prior behaviour."""
-        found_macs = []
-        all_configs = []
-
-        full_mac = '001122334455'
-        filename = 'SEP001122334455.cnf.xml'
-        content = '<device><sshUserId>user</sshUserId></device>'
-
-        if content:
-            if full_mac == thief.DEFAULT_MAC_SENTINEL:
-                device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-            else:
-                device_key = f'SEP{full_mac}'
-                found_macs.append(full_mac)
-            all_configs.append((device_key, content))
-
-        assert found_macs == ['001122334455']
-        assert all_configs == [('SEP001122334455', content)]
-
-    def test_non_cnf_xml_default_filename_kept_as_is(self, monkeypatch):
-        """Default files that don't end in .cnf.xml (e.g., ITLFile.tlv) must
-        keep their full name as the device key."""
-        full_mac = thief.DEFAULT_MAC_SENTINEL
-        filename = 'ITLFile.tlv'
-        content = '<tlv/>'
-
-        if full_mac == thief.DEFAULT_MAC_SENTINEL:
-            device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-        else:
-            device_key = f'SEP{full_mac}'
-
-        assert device_key == 'ITLFile.tlv'
+    def test_device_key_for_default_non_cnf_xml_kept_as_is(self):
+        assert thief.device_key_for_result(thief.DEFAULT_MAC_SENTINEL, 'ITLFile.tlv') == 'ITLFile.tlv'

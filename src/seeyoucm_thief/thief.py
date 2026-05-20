@@ -1434,6 +1434,17 @@ def build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len):
     return all_candidates
 
 
+def device_key_for_result(full_mac, filename):
+    """Return the device identifier to key credentials/usernames under for a
+    brute-force result. For real MAC addresses this is ``SEP<full_mac>``; for
+    DEFAULT-file results (no real MAC) it is the filename with ``.cnf.xml``
+    stripped, matching the existing convention used by ``log_credentials_to_db``.
+    """
+    if full_mac == DEFAULT_MAC_SENTINEL:
+        return filename[:-8] if filename.endswith('.cnf.xml') else filename
+    return f'SEP{full_mac}'
+
+
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
@@ -1851,11 +1862,8 @@ def main():
                                 skipped += 1
 
                             if content:
-                                # For default-file tasks, key by filename; for real MACs, key by SEP<mac>.
-                                if full_mac == DEFAULT_MAC_SENTINEL:
-                                    device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-                                else:
-                                    device_key = f'SEP{full_mac}'
+                                device_key = device_key_for_result(full_mac, filename)
+                                if full_mac != DEFAULT_MAC_SENTINEL:
                                     found_macs.append(full_mac)
                                 all_configs.append((device_key, content))
                                 successful += 1
@@ -1884,11 +1892,8 @@ def main():
                                 skipped += 1
 
                             if content:
-                                # For default-file tasks, key by filename; for real MACs, key by SEP<mac>.
-                                if full_mac == DEFAULT_MAC_SENTINEL:
-                                    device_key = filename[:-8] if filename.endswith('.cnf.xml') else filename
-                                else:
-                                    device_key = f'SEP{full_mac}'
+                                device_key = device_key_for_result(full_mac, filename)
+                                if full_mac != DEFAULT_MAC_SENTINEL:
                                     found_macs.append(full_mac)
                                 all_configs.append((device_key, content))
                                 successful += 1
