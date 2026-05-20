@@ -116,3 +116,37 @@ class TestExtractConfigsSkipExisting:
         assert errors == 0
         # The manually-edited content must NOT be overwritten.
         assert target.read_text() == 'manually-edited'
+
+
+class TestExtractConfigsPathTraversal:
+    def test_malicious_filename_is_rejected(self, tmp_path):
+        db_path = tmp_path / 'thief.db'
+        out_dir = tmp_path / 'configs'
+        outside = tmp_path / 'evil.txt'
+
+        _make_db_with_rows(db_path, [
+            # filename contains traversal — must be rejected.
+            {'cucm_host': '10.0.1.5',
+             'filename': '../evil.txt',
+             'success': 1, 'content': 'pwned'},
+            # cucm_host contains traversal — must be rejected.
+            {'cucm_host': '../../etc',
+             'filename': 'passwd',
+             'success': 1, 'content': 'pwned'},
+            # One clean row to ensure the loop continues after rejects.
+            {'cucm_host': '10.0.1.5', 'filename': 'OK.cnf.xml',
+             'success': 1, 'content': '<xml>ok</xml>'},
+        ])
+
+        written, skipped, errors = thief.extract_configs_from_db(
+            str(db_path), str(out_dir)
+        )
+
+        assert written == 1
+        assert skipped == 0
+        assert errors == 2
+        # The clean row was written.
+        assert (out_dir / '10.0.1.5' / 'OK.cnf.xml').exists()
+        # Nothing escaped output_dir.
+        assert not outside.exists()
+        assert not (tmp_path / 'evil.txt').exists()
