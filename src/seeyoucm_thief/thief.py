@@ -1463,17 +1463,19 @@ def extract_configs_from_db(db_file, output_dir, debug=False):
     os.makedirs(output_dir, exist_ok=True)
 
     conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT cucm_host, filename, content
-        FROM download_attempts
-        WHERE success = 1
-          AND content IS NOT NULL
-          AND length(content) > 0
-        ORDER BY cucm_host, filename
-    ''')
-    rows = cursor.fetchall()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT cucm_host, filename, content
+            FROM download_attempts
+            WHERE success = 1
+              AND content IS NOT NULL
+              AND length(content) > 0
+            ORDER BY cucm_host, filename
+        ''')
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
 
     written = 0
     skipped = 0
