@@ -30,6 +30,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HTTP_TFTP_PORT = 6970
 # CUCM User Data Services (UDS) API — HTTPS only, default 8443
 UDS_PORT = 8443
+# Well-known default filenames the CUCM TFTP service hosts in addition to
+# per-device SEP<MAC>.cnf.xml configs. Always attempted so we can surface
+# firmware versions, trust-list presence, Jabber bootstrap config, etc.
+DEFAULT_TFTP_FILES = (
+    'XMLDefault.cnf.xml',
+    'SEPDefault.cnf.xml',
+    'SIPDefault.cnf',
+    'ITLFile.tlv',
+    'CTLFile.tlv',
+    'RingList.xml',
+    'Ringlist-wb.xml',
+    'DistinctiveRingList.xml',
+    'jabber-config.xml',
+)
 # Global variables
 debug = False
 found_credentials = []

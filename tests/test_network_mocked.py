@@ -580,3 +580,27 @@ class TestGetConfigNames:
         ])
         result = thief.get_config_names('10.0.0.1', hostnames=None)
         assert result == ['SEPAABBCCDDEEFF.cnf.xml']
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_TFTP_FILES constant
+# ---------------------------------------------------------------------------
+
+class TestDefaultTftpFiles:
+    def test_constant_contains_expected_files(self):
+        expected = {
+            'XMLDefault.cnf.xml',
+            'SEPDefault.cnf.xml',
+            'SIPDefault.cnf',
+            'ITLFile.tlv',
+            'CTLFile.tlv',
+            'RingList.xml',
+            'Ringlist-wb.xml',
+            'DistinctiveRingList.xml',
+            'jabber-config.xml',
+        }
+        assert set(thief.DEFAULT_TFTP_FILES) == expected
+
+    def test_constant_is_tuple(self):
+        # Tuple, not list — these are an immutable constant.
+        assert isinstance(thief.DEFAULT_TFTP_FILES, tuple)
