@@ -555,22 +555,25 @@ class TestDownloadWorker:
 class TestGetConfigNames:
     def test_returns_filenames_for_hostnames(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_strips_domain_from_hostnames(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455.example.com'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_already_has_extension(self):
         result = thief.get_config_names('10.0.0.1', hostnames=['SEP001122334455.cnf.xml'])
-        assert result == ['SEP001122334455.cnf.xml']
+        assert 'SEP001122334455.cnf.xml' in result
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
     def test_empty_hostnames_falls_back_to_cache_list(self, monkeypatch):
-        # With no hostnames, get_config_names now falls back to fetching
-        # ConfigFileCacheList.txt from the CUCM TFTP service.
+        # With no hostnames and empty cache list, get_config_names returns defaults.
         monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [])
         result = thief.get_config_names('10.0.0.1', hostnames=[])
-        assert result == []
+        # No per-device entries, but defaults are always appended.
+        assert set(result) == set(thief.DEFAULT_TFTP_FILES)
 
     def test_none_hostnames_falls_back_to_cache_list(self, monkeypatch):
         monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: [
@@ -579,7 +582,34 @@ class TestGetConfigNames:
             'RingList.xml',
         ])
         result = thief.get_config_names('10.0.0.1', hostnames=None)
-        assert result == ['SEPAABBCCDDEEFF.cnf.xml']
+        assert 'SEPAABBCCDDEEFF.cnf.xml' in result
+
+    def test_hostnames_path_includes_defaults_after_per_device(self):
+        result = thief.get_config_names('cucm.example', hostnames=['SEPABC123456789'])
+        # Per-device filename comes first.
+        assert result[0] == 'SEPABC123456789.cnf.xml'
+        # All defaults appear, in declared order, after per-device entries.
+        defaults_in_result = [f for f in result if f in thief.DEFAULT_TFTP_FILES]
+        assert defaults_in_result == list(thief.DEFAULT_TFTP_FILES)
+
+    def test_hostnames_path_dedupes_when_hostname_collides_with_default(self):
+        # If a caller happens to pass a hostname matching a default, the result
+        # should still contain that name exactly once.
+        result = thief.get_config_names('cucm.example', hostnames=['XMLDefault'])
+        assert result.count('XMLDefault.cnf.xml') == 1
+
+    def test_empty_hostnames_none_falls_back_to_cache_list_with_defaults(self, monkeypatch):
+        monkeypatch.setattr(thief, 'get_cache_list', lambda *a, **kw: ['SEP111111111111.cnf.xml'])
+        result = thief.get_config_names('cucm.example', hostnames=None)
+        assert 'SEP111111111111.cnf.xml' in result
+        for default in thief.DEFAULT_TFTP_FILES:
+            assert default in result
+
+    def test_no_hostnames_no_cucm_returns_only_defaults(self):
+        # Previous behavior: returned []. New behavior: still return defaults,
+        # since they're attempted unconditionally.
+        result = thief.get_config_names(None, hostnames=None)
+        assert set(result) == set(thief.DEFAULT_TFTP_FILES)
 
 
 # ---------------------------------------------------------------------------

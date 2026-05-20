@@ -470,10 +470,20 @@ def get_cache_list(cucm_host, use_tftp=True):
 
 def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     if _TEST_MODE:
-        return ["SEPTEST00000000.cnf.xml"]
+        # Preserve historical fixture filename, then append defaults so tests
+        # that monkeypatch _TEST_MODE off still get consistent behavior with
+        # the production path.
+        return ["SEPTEST00000000.cnf.xml", *DEFAULT_TFTP_FILES]
+
+    filenames = []
+    seen = set()
+
+    def _add(name):
+        if name and name not in seen:
+            seen.add(name)
+            filenames.append(name)
 
     if hostnames:
-        filenames = []
         for host in hostnames:
             if not host:
                 continue
@@ -482,19 +492,23 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
             if not name:
                 continue
             if name.lower().endswith('.cnf.xml'):
-                filenames.append(name)
+                _add(name)
             else:
-                filenames.append(f'{name}.cnf.xml')
-        return filenames if filenames else []
+                _add(f'{name}.cnf.xml')
+    elif cucm_host:
+        # No hostnames provided — fall back to ConfigFileCacheList.txt for full
+        # enumeration of every device config the CUCM TFTP service has cached.
+        entries = get_cache_list(cucm_host, use_tftp=use_tftp)
+        cnf_files = [e for e in entries if e.lower().endswith('.cnf.xml')]
+        dbg(f'Cache list yielded {len(cnf_files)} .cnf.xml entries')
+        for entry in cnf_files:
+            _add(entry)
 
-    # No hostnames provided — fall back to ConfigFileCacheList.txt for full
-    # enumeration of every device config the CUCM TFTP service has cached.
-    if not cucm_host:
-        return []
-    entries = get_cache_list(cucm_host, use_tftp=use_tftp)
-    cnf_files = [e for e in entries if e.lower().endswith('.cnf.xml')]
-    dbg(f'Cache list yielded {len(cnf_files)} .cnf.xml entries')
-    return cnf_files
+    # Always attempt the well-known CUCM default files.
+    for default in DEFAULT_TFTP_FILES:
+        _add(default)
+
+    return filenames
 
 
 def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
