@@ -168,3 +168,16 @@ class TestExtractConfigsEmptyDb:
         assert errors == 0
         # output_dir was created even though no files were written.
         assert out_dir.exists() and out_dir.is_dir()
+
+
+class TestExtractConfigsMissingDb:
+    def test_missing_db_raises_filenotfound(self, tmp_path):
+        missing_db = tmp_path / 'does-not-exist.db'
+        out_dir = tmp_path / 'configs'
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            thief.extract_configs_from_db(str(missing_db), str(out_dir))
+
+        assert 'does-not-exist.db' in str(excinfo.value)
+        # output_dir should NOT have been created when the DB is missing.
+        assert not out_dir.exists()
