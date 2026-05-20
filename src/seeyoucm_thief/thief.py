@@ -1951,22 +1951,7 @@ def main():
                     sys.stdout.flush()
                 except (ValueError, AttributeError):
                     pass
-        
-        # Wait for all queued work to be completed
-        try:
-            print(f'\n[*] Waiting for all workers to finish processing...')
-            sys.stdout.flush()
-        except (ValueError, AttributeError):
-            pass
-        
-        work_queue.join()
-        
-        try:
-            print(f'[*] All tasks completed!')
-            sys.stdout.flush()
-        except (ValueError, AttributeError):
-            pass
-        
+
         # Print summary
         if found_macs:
             mac_list = ', '.join([f"SEP{mac}" for mac in found_macs[:10]])
@@ -2216,44 +2201,32 @@ def main():
         print('You must enter either a phone IP address or the IP address of the CUCM server')
         quit(1)
     file_names = get_config_names(CUCM_host, hostnames=hostnames or None, use_tftp=use_tftp)
-    if not file_names and phones:
-        hostnames = [get_hostname_from_phone(phones[0])]
-        hostnames += get_phones_hostnames_from_reverse(phones[0]) or []
-        file_names = get_config_names(CUCM_host, hostnames=hostnames, use_tftp=use_tftp)
+    print(f'[+] Discovered {len(file_names)} config file name(s) to inspect')
+    all_credentials = []
+    all_usernames = []
+    for file in file_names:
+        creds, users = search_for_secrets(CUCM_host, file, use_tftp)
+        all_credentials.extend(creds)
+        all_usernames.extend(users)
 
-    if not file_names:
-        print('[-] No config file names discovered (ConfigFileCacheList.txt unreachable and no hostnames provided).')
-        print('[*] Try adding -p <phone_ip>, -b/--brute-mac, --userenum, or -e <cidr>.')
-        quit(1)
-    else:
-        print(f'[+] Discovered {len(file_names)} config file name(s) to inspect')
-        # Results are collected in all_credentials and all_usernames below
-        all_credentials = []
-        all_usernames = []
-        if file_names:
-            for file in file_names:
-                creds, users = search_for_secrets(CUCM_host, file, use_tftp)
-                all_credentials.extend(creds)
-                all_usernames.extend(users)
+    if all_credentials:
+        print('Credentials Found in Configurations!')
+        for cred in all_credentials:
+            print('{0}\t{1}\t{2}'.format(cred[0], cred[1], cred[2]))
 
-        if all_credentials:
-            print('Credentials Found in Configurations!')
-            for cred in all_credentials:
-                print('{0}\t{1}\t{2}'.format(cred[0], cred[1], cred[2]))
+    if all_usernames:
+        print('Usernames Found in Configurations!')
+        for usernames in all_usernames:
+            print('{0}\t{1}'.format(usernames[0], usernames[1]))
 
-        if all_usernames:
-            print('Usernames Found in Configurations!')
-            for usernames in all_usernames:
-                print('{0}\t{1}'.format(usernames[0], usernames[1]))
-
-        # Always write to database unless --no-db is set
-        if not no_db and (all_credentials or all_usernames):
-            if debug:
-                print(f'[DEBUG] Writing to DB: CUCM_host={CUCM_host}, credentials={all_credentials}, usernames={all_usernames}, db_file={db_file}')
-            result = log_credentials_to_db(CUCM_host, all_credentials, all_usernames, db_file)
-            if debug:
-                print(f'[DEBUG] log_credentials_to_db returned: {result}')
-        quit(0)
+    # Always write to database unless --no-db is set
+    if not no_db and (all_credentials or all_usernames):
+        if debug:
+            print(f'[DEBUG] Writing to DB: CUCM_host={CUCM_host}, credentials={all_credentials}, usernames={all_usernames}, db_file={db_file}')
+        result = log_credentials_to_db(CUCM_host, all_credentials, all_usernames, db_file)
+        if debug:
+            print(f'[DEBUG] log_credentials_to_db returned: {result}')
+    quit(0)
 
 if __name__ == '__main__':
     main()
