@@ -9,10 +9,8 @@ description = "Penetration toolkit for extracting credentials from Cisco phone s
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "requests==2.32.5",
-    "beautifulsoup4==4.14.3",
+    "requests==2.33.0",
     "alive-progress==3.3.0",
-    "lxml==6.0.2",
     "tftpy==0.8.7",
 ]
 
@@ -28,5 +26,5 @@ version_scheme = "guess-next-dev"
 
 [dependency-groups]
 dev = [
-    "pytest==9.0.2",
+    "pytest==9.0.3",
 ]

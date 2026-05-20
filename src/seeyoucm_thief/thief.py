@@ -17,7 +17,6 @@ import queue
 import random
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
-from bs4 import BeautifulSoup
 from alive_progress import alive_bar
 import tftpy
 import urllib3
