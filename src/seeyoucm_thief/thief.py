@@ -1384,6 +1384,47 @@ def get_phones_from_gowitness(gowitness_db):
         print(f'[-] Unexpected error reading gowitness database: {str(e)}')
         return []
 
+def build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len):
+    """Build a randomized, CUCM-interleaved list of (cucm, full_mac, filename)
+    download tasks for the brute-force MAC enumeration flow.
+
+    Per-MAC SEP<full_mac>.cnf.xml tasks are generated for every suffix
+    permutation. Returns a flat list ordered by interleaving CUCMs so worker
+    load is spread across servers rather than hammering one at a time.
+    """
+    candidates_by_cucm = {}
+    max_variations = 16 ** brute_mac_len
+    for partial_mac in all_found_macs:
+        phone_cucm = mac_to_cucm[partial_mac]
+        if phone_cucm not in candidates_by_cucm:
+            candidates_by_cucm[phone_cucm] = set()
+        for i in range(max_variations):
+            suffix = f'{i:0{brute_mac_len}X}'.zfill(brute_mac_len)
+            full_mac = (partial_mac + suffix)[:12]
+            filename = f'SEP{full_mac}.cnf.xml'
+            candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
+
+    # Randomize per-CUCM, then interleave to distribute load across servers.
+    for cucm in candidates_by_cucm:
+        candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])
+        random.shuffle(candidates_by_cucm[cucm])
+
+    all_candidates = []
+    cucm_order = list(candidates_by_cucm.keys())
+    idx = 0
+    while True:
+        added = False
+        for cucm in cucm_order:
+            if idx < len(candidates_by_cucm[cucm]):
+                all_candidates.append(candidates_by_cucm[cucm][idx])
+                added = True
+        if not added:
+            break
+        idx += 1
+
+    return all_candidates
+
+
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
@@ -1721,38 +1762,7 @@ def main():
         
         # Build combined list of all MAC candidates from all phones
         print(f'Building randomized candidate list for {len(all_found_macs)} MAC prefix(es)...')
-        candidates_by_cucm = {}
-        max_variations = 16 ** brute_mac_len
-        for partial_mac in all_found_macs:
-            phone_cucm = mac_to_cucm[partial_mac]
-            if phone_cucm not in candidates_by_cucm:
-                candidates_by_cucm[phone_cucm] = set()
-            for i in range(max_variations):
-                suffix = f'{i:0{brute_mac_len}X}'.zfill(brute_mac_len)
-                # Always ensure full_mac is 12 characters
-                full_mac = (partial_mac + suffix)[:12]
-                filename = f'SEP{full_mac}.cnf.xml'
-                candidates_by_cucm[phone_cucm].add((phone_cucm, full_mac, filename))
-
-        # Randomize per-CUCM queues, then interleave to distribute load across servers
-        for cucm in candidates_by_cucm:
-            # Convert set to list and shuffle
-            candidates_by_cucm[cucm] = list(candidates_by_cucm[cucm])
-            random.shuffle(candidates_by_cucm[cucm])
-
-        all_candidates = []
-        cucm_order = list(candidates_by_cucm.keys())
-        idx = 0
-        while True:
-            added = False
-            for cucm in cucm_order:
-                if idx < len(candidates_by_cucm[cucm]):
-                    all_candidates.append(candidates_by_cucm[cucm][idx])
-                    added = True
-            if not added:
-                break
-            idx += 1
-
+        all_candidates = build_brute_force_candidates(all_found_macs, mac_to_cucm, brute_mac_len)
         print(f'Randomized {len(all_candidates)} total candidates across all phones\n')
         
         # ============================================================================

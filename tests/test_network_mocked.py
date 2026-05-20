@@ -613,6 +613,42 @@ class TestGetConfigNames:
 
 
 # ---------------------------------------------------------------------------
+# build_brute_force_candidates
+# ---------------------------------------------------------------------------
+
+class TestBuildBruteForceCandidates:
+    def test_one_candidate_per_suffix_per_prefix(self):
+        # Suffix length 1 => 16 candidates per prefix.
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['001122334455'[:11]],  # 11-char prefix
+            mac_to_cucm={'00112233445': 'cucm.example'},
+            brute_mac_len=1,
+        )
+        # 16 SEP files, all on the same CUCM
+        sep_tasks = [c for c in candidates if c[2].startswith('SEP')]
+        assert len(sep_tasks) == 16
+        assert {c[0] for c in sep_tasks} == {'cucm.example'}
+        # Filenames are SEP<12 hex chars>.cnf.xml
+        for cucm, full_mac, fname in sep_tasks:
+            assert fname == f'SEP{full_mac}.cnf.xml'
+            assert len(full_mac) == 12
+
+    def test_groups_by_cucm(self):
+        # Two prefixes, different CUCMs.
+        candidates = thief.build_brute_force_candidates(
+            all_found_macs=['00112233445', 'AABBCCDDEEF'],
+            mac_to_cucm={'00112233445': 'cucm-a', 'AABBCCDDEEF': 'cucm-b'},
+            brute_mac_len=1,
+        )
+        sep_tasks = [c for c in candidates if c[2].startswith('SEP')]
+        by_cucm = {}
+        for cucm, _full_mac, _fname in sep_tasks:
+            by_cucm.setdefault(cucm, 0)
+            by_cucm[cucm] += 1
+        assert by_cucm == {'cucm-a': 16, 'cucm-b': 16}
+
+
+# ---------------------------------------------------------------------------
 # DEFAULT_TFTP_FILES constant
 # ---------------------------------------------------------------------------
 
