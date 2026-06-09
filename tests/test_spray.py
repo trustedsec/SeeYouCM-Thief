@@ -637,3 +637,79 @@ def test_show_db_omits_spray_section_when_no_hits(db_path, capsys):
     thief.display_database_summary(db_path)
     out = capsys.readouterr().out
     assert "UDS Spray Hits" not in out
+
+
+# ---------------------------------------------------------------------------
+# --spray-user-as-pass
+# ---------------------------------------------------------------------------
+
+def test_spray_worker_uses_username_as_password_when_user_as_pass(db_path):
+    """When user_as_pass=True the worker must authenticate with password=username."""
+    work = queue_mod.Queue()
+    work.put("alice")
+    results = {"hits": 0, "misses": 0, "errors": 0, "other": 0, "lock": threading.Lock()}
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured['auth'] = kwargs.get('auth')
+        return MagicMock(status_code=401, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief._spray_worker(
+            work_queue=work, results=results, password=None,
+            cucm_host="cucm-a.example.com", port=8443, db_file=db_path,
+            dead_flag=threading.Event(), user_as_pass=True,
+        )
+
+    assert captured['auth'] == ('alice', 'alice')
+
+
+def test_run_spray_user_as_pass_uses_username_as_password(monkeypatch, db_path):
+    """run_spray(user_as_pass=True) should attempt username:username for each user."""
+    _patch_get_users(monkeypatch, ["alice", "bob"])
+    _patch_oracle(monkeypatch, 'ok')
+
+    attempted = {}
+
+    def fake_get(url, **kwargs):
+        user = url.rsplit('/', 1)[-1]
+        attempted[user] = kwargs.get('auth')
+        return MagicMock(status_code=401, text="")
+
+    with patch.object(thief.requests, 'get', side_effect=fake_get):
+        thief.run_spray(
+            cucm_host="cucm-a.example.com", port=8443,
+            passwords=[], threads=2,
+            rate_limit_hours=1, probe=True, db_file=db_path,
+            user_as_pass=True,
+        )
+
+    assert attempted.get('alice') == ('alice', 'alice')
+    assert attempted.get('bob') == ('bob', 'bob')
+
+
+def test_cli_spray_user_as_pass_invokes_run_spray_correctly(monkeypatch, tmp_path):
+    called = {}
+    monkeypatch.setattr(thief, 'run_spray', lambda **kw: called.update(kw))
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db = tmp_path / "thief.db"
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray', '--spray-user-as-pass',
+        '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    assert called.get('user_as_pass') is True
+
+
+def test_cli_spray_user_as_pass_mutually_exclusive_with_password(monkeypatch, tmp_path, capsys):
+    db = tmp_path / "thief.db"
+    monkeypatch.setattr('sys.argv', [
+        'thief', '-H', '1.2.3.4', '--spray',
+        '--spray-user-as-pass', '--spray-password', 'bad',
+        '--db', str(db),
+    ])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert 'exactly one' in out or 'mutually exclusive' in out.lower() or 'exclusive' in out
