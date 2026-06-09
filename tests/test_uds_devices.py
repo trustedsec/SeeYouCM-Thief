@@ -201,3 +201,60 @@ def test_show_db_omits_uds_devices_section_when_empty(db_path, capsys):
     thief.display_database_summary(db_path)
     out = capsys.readouterr().out
     assert "UDS Devices" not in out
+
+
+# ---------------------------------------------------------------------------
+# download_uds_discovered_configs
+# ---------------------------------------------------------------------------
+
+def test_download_uds_discovered_configs_calls_search_for_each_device(db_path, monkeypatch):
+    searched = []
+    monkeypatch.setattr(thief, 'search_for_secrets',
+                        lambda host, filename, use_tftp=True: (searched.append(filename), ([], []))[1])
+
+    thief.download_uds_discovered_configs(
+        "cucm.example.com", ["SEP001122334455", "SEP667788990011"], db_path,
+    )
+
+    assert "SEP001122334455.cnf.xml" in searched
+    assert "SEP667788990011.cnf.xml" in searched
+
+
+def test_download_uds_discovered_configs_logs_credentials_to_db(db_path, monkeypatch):
+    monkeypatch.setattr(thief, 'search_for_secrets',
+                        lambda host, filename, use_tftp=True: ([('admin', 'cisco', filename)], []))
+
+    thief.download_uds_discovered_configs(
+        "cucm.example.com", ["SEP001122334455"], db_path,
+    )
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT username, password FROM credentials").fetchall()
+    conn.close()
+    assert ("admin", "cisco") in rows
+
+
+def test_download_uds_discovered_configs_returns_hit_count(db_path, monkeypatch):
+    def fake_search(host, filename, use_tftp=True):
+        if "001122334455" in filename:
+            return ([('admin', 'cisco', filename)], [])
+        return ([], [])
+
+    monkeypatch.setattr(thief, 'search_for_secrets', fake_search)
+
+    count = thief.download_uds_discovered_configs(
+        "cucm.example.com", ["SEP001122334455", "SEP667788990011"], db_path,
+    )
+
+    assert count == 1
+
+
+def test_download_uds_discovered_configs_handles_empty_list(db_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(thief, 'search_for_secrets', lambda *a, **kw: called.append(1) or ([], []))
+
+    count = thief.download_uds_discovered_configs("cucm.example.com", [], db_path)
+
+    assert count == 0
+    assert called == []
