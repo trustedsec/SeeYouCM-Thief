@@ -1251,6 +1251,24 @@ def init_database(db_file='thief.db'):
         )
     ''')
 
+    # Create table for CCMAdmin credential-verification attempts (--verify)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS verification_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            result TEXT NOT NULL,
+            status_code INTEGER,
+            error TEXT,
+            attempt_time TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_verification_attempts_host_user
+            ON verification_attempts(cucm_host, username)
+    ''')
+
     conn.commit()
     conn.close()
     # Tighten DB file permissions — config XML and spray attempts contain
