@@ -16,6 +16,7 @@ Multi-threaded tool to automatically download and parse configuration files from
 - **CSV export**: Export discovered credentials to CSV format
 - **User enumeration**: Extract usernames via CUCM User Data Services (UDS) API
 - **Password spray**: HTTP Basic Auth spray against the UDS user endpoint with persistent per-username rate limiting and a pre-flight oracle probe
+- **Credential verification**: replay harvested credential pairs against the CUCM CCMAdmin portal, with a full audit trail of timestamped attempts
 
 ## Usage
 
@@ -94,6 +95,24 @@ A pre-flight oracle probe sends one bogus credential to verify the endpoint vali
 
 **Operator safety:** If CUCM is configured with LDAP Authentication, end-user spray attempts pass through to AD. Confirm domain lockout policy before running and tighten `--spray-rate-limit-hours` if needed.
 
+### Verify Credentials
+
+Take the credential pairs already harvested into the database and test them against the CUCM administration portal (CCMAdmin), recording every attempt for auditing:
+
+```bash
+./thief.py --verify                     # every stored pair vs every known host
+./thief.py --verify -H <CUCM Server>    # restrict to a single host
+./thief.py --verify --verify-port 443   # CCMAdmin on 443 instead of the 8443 default
+```
+
+`--verify` reads every `credentials` row that has both a username and a password, dedupes to distinct pairs, and attempts a CCMAdmin form login (Tomcat `j_security_check`) for the **cross-product** of those pairs against every CUCM host known to the database (the union of harvested credential hosts, phone→CUCM mappings, and discovered cluster members). Pass `-H/--host` to narrow the host set to one target.
+
+Every attempt — valid, invalid, or error — is written with a timestamp to the `verification_attempts` table for auditing. A `(host, username, password)` combination that already has a definitive result (`valid`/`invalid`) is skipped on later runs; `error` results (network failures, unexpected responses) are retried. Confirmed admin logins print live (`[+] VALID admin: user@host`) and surface in `--show-db` under "Verified Admin Credentials". Tune concurrency with `--verify-threads` (default: 10).
+
+`--verify` requires the database (incompatible with `--no-db`) and is mutually exclusive with `--brute-mac` and `--spray`. As with the other features, plaintext passwords are stored in `thief.db`, which is created `chmod 0600`.
+
+**Operator safety:** CCMAdmin login failures count against CUCM/AD account-lockout policy. Confirm the lockout threshold before running broad cross-product verification against production.
+
 ### Database Operations
 
 View cached results:
@@ -161,6 +180,9 @@ Export to CSV:
 - `--spray-threads N`: Concurrent spray workers (default: 10)
 - `--spray-rate-limit-hours N`: Per-username rate-limit window in hours (default: 1)
 - `--no-spray-probe`: Skip the pre-flight oracle probe (use only after manual verification)
+- `--verify`: Verify stored credential pairs against each known CUCM CCMAdmin portal (requires the database; mutually exclusive with `--brute-mac` and `--spray`)
+- `--verify-port PORT`: CCMAdmin HTTPS port for `--verify` (default: 8443; some clusters use 443)
+- `--verify-threads N`: Concurrent verification workers (default: 10)
 
 ### Output Options
 - `--csv FILENAME`: Export discovered credentials to CSV file
