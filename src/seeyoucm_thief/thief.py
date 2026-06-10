@@ -704,6 +704,118 @@ def log_spray_attempt(cucm_host, username, password, status_code, error, db_file
             return
 
 
+def log_verification_attempt(cucm_host, username, password, result, status_code, error, db_file='thief.db'):
+    """
+    Append a row to verification_attempts. Retries with exponential backoff on
+    SQLite 'database is locked' since worker threads write concurrently.
+    Every attempt — valid, invalid, or error — is recorded for auditing.
+    """
+    max_retries = 5
+    retry_delay = 0.1
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_file, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO verification_attempts
+                    (cucm_host, username, password, result, status_code, error, attempt_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (cucm_host, username, password, result, status_code, error, timestamp))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+                continue
+            if globals().get('debug', False):
+                print(f'[!] log_verification_attempt sqlite error: {e}')
+            return
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] log_verification_attempt error: {e}')
+            return
+
+
+def is_already_verified(cucm_host, username, password, db_file='thief.db'):
+    """
+    Return True iff this exact (cucm_host, username, password) already has a
+    definitive verification_attempts row (result 'valid' or 'invalid').
+    'error' rows do not count — they remain retryable on a later run.
+    Fails closed to False (attempt again) if the table is missing / unreadable.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM verification_attempts
+             WHERE cucm_host = ? AND username = ? AND password = ?
+               AND result IN ('valid', 'invalid')
+             LIMIT 1
+        ''', (cucm_host, username, password))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] is_already_verified error: {e}')
+        return False
+
+
+def get_distinct_credential_pairs(db_file='thief.db'):
+    """
+    Return a list of distinct (username, password) tuples from the credentials
+    table where both fields are non-empty. Order is unspecified.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT username, password FROM credentials
+             WHERE username IS NOT NULL AND username != ''
+               AND password IS NOT NULL AND password != ''
+        ''')
+        pairs = [(u, p) for u, p in cursor.fetchall()]
+        conn.close()
+        return pairs
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_distinct_credential_pairs error: {e}')
+        return []
+
+
+def get_known_cucm_hosts(db_file='thief.db'):
+    """
+    Return a sorted list of distinct CUCM hosts known to the DB: the union of
+    credentials.cucm_host, phone_cucm.cucm_host, and cluster_servers hostname
+    and ipv4. Empty/NULL values are dropped.
+    """
+    hosts = set()
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        for sql in (
+            'SELECT cucm_host FROM credentials',
+            'SELECT cucm_host FROM phone_cucm',
+            'SELECT hostname FROM cluster_servers',
+            'SELECT ipv4 FROM cluster_servers',
+        ):
+            try:
+                for (val,) in cursor.execute(sql).fetchall():
+                    if val:
+                        hosts.add(val)
+            except sqlite3.OperationalError as e:
+                if 'no such table' not in str(e):
+                    raise
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_known_cucm_hosts error: {e}')
+    return sorted(hosts)
+
+
 def parse_uds_devices(xml_body):
     """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
