@@ -229,3 +229,18 @@ def test_cli_verify_mutually_exclusive_with_spray(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         thief.main()
     assert ei.value.code == 1
+
+
+def test_show_db_lists_verified_admins(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    thief.log_verification_attempt("cucmX", "admin", "pw", "valid", 302, None, db)
+    thief.log_verification_attempt("cucmX", "bad", "nope", "invalid", 200, None, db)
+
+    monkeypatch.setattr(sys, "argv", ["thief", "--show-db", "--db", db])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert "Verified Admin Credentials" in out
+    assert "admin" in out and "cucmX" in out
+    assert "bad" not in out

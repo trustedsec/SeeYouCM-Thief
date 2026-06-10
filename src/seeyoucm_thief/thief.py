@@ -1878,6 +1878,30 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get verified admin credentials (result == 'valid')
+        verified_admins = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM verification_attempts
+                     WHERE result = 'valid' AND cucm_host = ?
+                     ORDER BY attempt_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM verification_attempts
+                     WHERE result = 'valid'
+                     ORDER BY attempt_time DESC
+                ''')
+            verified_admins = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                verified_admins = []
+            else:
+                raise
+
         # Get UDS devices (unauthenticated enum or spray hit)
         uds_devices = []
         try:
@@ -1928,7 +1952,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not verified_admins:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -2034,6 +2058,11 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         if spray_hits:
             print('\n=== UDS Spray Hits ===')
             for host, user, pw, ts in spray_hits:
+                print(f'  [{ts}] {host}  {user} : {pw}')
+
+        if verified_admins:
+            print('\n=== Verified Admin Credentials ===')
+            for host, user, pw, ts in verified_admins:
                 print(f'  [{ts}] {host}  {user} : {pw}')
 
         if uds_devices:
