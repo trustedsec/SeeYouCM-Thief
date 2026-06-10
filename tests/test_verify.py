@@ -73,3 +73,125 @@ def test_get_distinct_credential_pairs_and_hosts(tmp_path):
 
     hosts = thief.get_known_cucm_hosts(db)
     assert hosts == sorted({"cA", "cB", "cC", "cD", "5.6.7.8"})
+
+
+class _FakeResp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _FakeSession:
+    """Records POSTs; returns a 200 GET then the queued POST response/exc."""
+    def __init__(self, post_resp, get_exc=None):
+        self._post_resp = post_resp
+        self._get_exc = get_exc
+        self.posted = None
+
+    def get(self, url, **kw):
+        if self._get_exc:
+            raise self._get_exc
+        return _FakeResp(200)
+
+    def post(self, url, data=None, **kw):
+        self.posted = (url, data)
+        if isinstance(self._post_resp, Exception):
+            raise self._post_resp
+        return self._post_resp
+
+
+def test_verify_login_valid():
+    sess = _FakeSession(_FakeResp(302, {"Location": "https://h:8443/ccmadmin/showHome.do"}))
+    result, code = thief.verify_ccmadmin_login(sess, "h", 8443, "admin", "pw")
+    assert result == "valid" and code == 302
+    url, data = sess.posted
+    assert url.endswith("/ccmadmin/j_security_check")
+    assert data == {"j_username": "admin", "j_password": "pw"}
+
+
+def test_verify_login_invalid_redirect_to_login():
+    sess = _FakeSession(_FakeResp(302, {"Location": "https://h:8443/ccmadmin/showHome.do?login_error=1"}))
+    result, code = thief.verify_ccmadmin_login(sess, "h", 8443, "admin", "bad")
+    assert result == "invalid" and code == 302
+
+
+def test_verify_login_invalid_200_form():
+    sess = _FakeSession(_FakeResp(200))
+    result, code = thief.verify_ccmadmin_login(sess, "h", 8443, "admin", "bad")
+    assert result == "invalid" and code == 200
+
+
+def test_verify_login_error_on_5xx():
+    sess = _FakeSession(_FakeResp(503))
+    result, code = thief.verify_ccmadmin_login(sess, "h", 8443, "admin", "pw")
+    assert result == "error" and code == 503
+
+
+def test_verify_login_error_on_exception():
+    import requests as _rq
+    sess = _FakeSession(_rq.exceptions.ConnectionError("boom"))
+    result, code = thief.verify_ccmadmin_login(sess, "h", 8443, "admin", "pw")
+    assert result == "error" and code is None
+
+
+def test_verify_worker_logs_and_tallies(tmp_path):
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    work = _queue.Queue()
+    for t in [("h1", "admin", "pw"), ("h2", "op", "bad"), ("h3", "x", "y")]:
+        work.put(t)
+
+    def fake_login(session, host, port, user, password, timeout=10):
+        return {"h1": ("valid", 302), "h2": ("invalid", 200), "h3": ("error", None)}[host]
+
+    results = {"valid": 0, "invalid": 0, "error": 0, "lock": _threading.Lock()}
+    thief._verify_worker(work, results, 8443, db, _login_fn=fake_login)
+
+    assert (results["valid"], results["invalid"], results["error"]) == (1, 1, 1)
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT cucm_host, username, password, result FROM verification_attempts ORDER BY cucm_host"
+    ).fetchall()
+    conn.close()
+    assert rows == [
+        ("h1", "admin", "pw", "valid"),
+        ("h2", "op", "bad", "invalid"),
+        ("h3", "x", "y", "error"),
+    ]
+
+
+def test_run_verify_skips_already_verified(tmp_path, monkeypatch):
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    thief.log_verification_attempt("h1", "admin", "pw", "invalid", 200, None, db)
+
+    attempted = []
+
+    def fake_login(session, host, port, user, password, timeout=10):
+        attempted.append((host, user, password))
+        return ("valid", 302)
+
+    monkeypatch.setattr(thief, "verify_ccmadmin_login", fake_login)
+
+    results = thief.run_verify(
+        hosts=["h1", "h2"],
+        pairs=[("admin", "pw")],
+        port=8443,
+        threads=4,
+        db_file=db,
+    )
+    assert ("h1", "admin", "pw") not in attempted
+    assert ("h2", "admin", "pw") in attempted
+    assert results["valid"] == 1
+    assert results["skipped"] == 1
+
+
+def test_run_verify_test_mode_is_noop(tmp_path, monkeypatch):
+    # _TEST_MODE is False during tests (module imported at collection time,
+    # before PYTEST_CURRENT_TEST is set), so force it True to exercise the
+    # early-return branch.
+    monkeypatch.setattr(thief, "_TEST_MODE", True)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    assert thief.run_verify(["h"], [("u", "p")], 8443, 4, db) is None

