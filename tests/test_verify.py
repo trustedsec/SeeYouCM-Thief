@@ -195,3 +195,37 @@ def test_run_verify_test_mode_is_noop(tmp_path, monkeypatch):
     db = str(tmp_path / "t.db")
     thief.init_database(db)
     assert thief.run_verify(["h"], [("u", "p")], 8443, 4, db) is None
+
+
+def test_cli_verify_dispatches(tmp_path, monkeypatch):
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    captured = {}
+
+    def fake_run_verify(hosts, pairs, port, threads, db_file):
+        captured["port"] = port
+        captured["threads"] = threads
+        captured["db_file"] = db_file
+        return None
+
+    monkeypatch.setattr(thief, "run_verify", fake_run_verify)
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--db", db,
+                                      "--verify-port", "443", "--verify-threads", "3"])
+    with pytest.raises(SystemExit) as ei:
+        thief.main()
+    assert ei.value.code == 0
+    assert captured == {"port": 443, "threads": 3, "db_file": db}
+
+
+def test_cli_verify_rejects_no_db(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--no-db"])
+    with pytest.raises(SystemExit) as ei:
+        thief.main()
+    assert ei.value.code == 1
+
+
+def test_cli_verify_mutually_exclusive_with_spray(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--spray", "-H", "h"])
+    with pytest.raises(SystemExit) as ei:
+        thief.main()
+    assert ei.value.code == 1

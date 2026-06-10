@@ -2301,6 +2301,12 @@ def main():
                         help='Per-username rate-limit window in hours (default: 1)')
     parser.add_argument('--no-spray-probe', action='store_true', default=False,
                         help='Skip the pre-flight oracle probe (use only after manual verification)')
+    parser.add_argument('--verify', action='store_true', default=False,
+                        help='Verify stored credential pairs against each known CUCM CCMAdmin portal (requires the database)')
+    parser.add_argument('--verify-port', type=int, default=8443,
+                        help='CCMAdmin HTTPS port for --verify (default: 8443; some clusters use 443)')
+    parser.add_argument('--verify-threads', type=int, default=10,
+                        help='Concurrent verification workers (default: 10)')
 
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
@@ -2451,6 +2457,30 @@ def main():
     dbg(f'parsed args: host={CUCM_host} phones={phones} brute_mac={brute_mac} '
         f'enumsubnet={enumsubnet} userenum={args.userenum} servers={args.servers} use_tftp={use_tftp} '
         f'threads={threads} db={db_file} no_db={no_db} force={force_download}')
+
+    if args.verify:
+        if args.no_db:
+            print('--verify requires the database; it cannot be used with --no-db')
+            quit(1)
+        if args.brute_mac:
+            print('--verify and --brute-mac are mutually exclusive')
+            quit(1)
+        if args.spray:
+            print('--verify and --spray are mutually exclusive')
+            quit(1)
+        pairs = get_distinct_credential_pairs(db_file)
+        if CUCM_host:
+            hosts = [CUCM_host]
+        else:
+            hosts = get_known_cucm_hosts(db_file)
+        run_verify(
+            hosts=hosts,
+            pairs=pairs,
+            port=args.verify_port,
+            threads=args.verify_threads,
+            db_file=db_file,
+        )
+        quit(0)
 
     if CUCM_host:
         version_info = get_version(CUCM_host, port=args.uds_port)
