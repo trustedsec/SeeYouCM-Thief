@@ -949,17 +949,17 @@ def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT,
     return 'error', []
 
 
-def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True):
+def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True, no_db=False):
     """
     Download and parse SEP config files for devices discovered via UDS.
-    Logs any credentials found to the DB.
+    Logs any credentials found to the DB unless no_db is True.
     Returns the count of configs that yielded at least one credential.
     """
     hits = 0
     for device_name in device_names:
         filename = f'{device_name}.cnf.xml'
         creds, users = search_for_secrets(cucm_host, filename, use_tftp=use_tftp)
-        if creds or users:
+        if not no_db and (creds or users):
             log_credentials_to_db(cucm_host, creds, users, db_file)
         if creds:
             hits += 1

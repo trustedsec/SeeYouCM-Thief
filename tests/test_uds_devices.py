@@ -310,3 +310,18 @@ def test_download_uds_discovered_configs_handles_empty_list(db_path, monkeypatch
 
     assert count == 0
     assert called == []
+
+
+def test_download_uds_discovered_configs_no_db_skips_credential_logging(db_path, monkeypatch):
+    monkeypatch.setattr(thief, 'search_for_secrets',
+                        lambda host, filename, use_tftp=True: ([('admin', 'cisco', filename)], []))
+    logged = []
+    monkeypatch.setattr(thief, 'log_credentials_to_db',
+                        lambda *a, **kw: logged.append(a))
+
+    count = thief.download_uds_discovered_configs(
+        "cucm.example.com", ["SEP001122334455"], db_path, no_db=True,
+    )
+
+    assert count == 1          # still counts a hit
+    assert logged == []        # but never touches the DB
