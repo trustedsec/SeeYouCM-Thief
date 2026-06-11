@@ -2740,7 +2740,7 @@ def main():
               f'{sweep["errors"]} error(s); {len(all_seps)} unique device(s) found across '
               f'{len(sweep["devices"])} user(s)')
         for target_user in sorted(sweep['devices']):
-            print(f'    {target_user}: {", ".join(sweep["devices"][target_user])}')
+            print(f'    {target_user}: {", ".join(sorted(sweep["devices"][target_user]))}')
 
         if not all_seps:
             quit(0)
