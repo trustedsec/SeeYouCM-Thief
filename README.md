@@ -77,6 +77,16 @@ Extract usernames via CUCM UDS API:
 ./thief.py -H <CUCM Server> --userenum
 ```
 
+### Authenticated Device Discovery
+
+Authenticate to the UDS API as a single end user, enumerate that user's associated SEP devices, then download and parse their config files for credentials:
+
+```bash
+./thief.py -H <CUCM Server> --uds-devices --uds-user jdoe --uds-password 'Passw0rd!'
+```
+
+`--uds-devices` requires `-H/--host`, `--uds-user`, and `--uds-password`. It needs **only end-user credentials** — no CCM Admin or AXL access is required. It honors `--uds-port` (default: 8443) and `--no-db`.
+
 ### Password Spray
 
 Spray a single password across every UDS-enumerated user, with a default 1-hour-per-user rate limit:
@@ -174,6 +184,9 @@ Export to CSV:
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
 - `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)
+- `--uds-devices`: Authenticate to the UDS API as a single end user, enumerate that user's associated SEP devices, and download + parse their configs (requires `-H`, `--uds-user`, and `--uds-password`; needs only end-user credentials — no admin/AXL access)
+- `--uds-user USERNAME`: End-user username for `--uds-devices` authentication
+- `--uds-password PASSWORD`: End-user password for `--uds-devices` authentication
 - `--spray`: Password-spray the UDS API (requires `-H`; mutually exclusive with `--brute-mac`)
 - `--spray-password PASSWORD`: Single password to spray across all eligible users
 - `-P, --passwords FILE`: Password list file; sprays each password in turn, sleeping ~1h between rounds
