@@ -115,6 +115,58 @@ def test_get_user_devices_unauthenticated_returns_empty_on_network_error():
 
 
 # ---------------------------------------------------------------------------
+# get_user_devices_authenticated
+# ---------------------------------------------------------------------------
+
+def test_get_user_devices_authenticated_returns_ok_and_devices_on_200():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "Summer2025!", port=8443)
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+    # Must send Basic auth as the end user
+    assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
+
+
+def test_get_user_devices_authenticated_returns_unauthorized_on_401():
+    fake_resp = MagicMock(status_code=401, text="")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "wrong", port=8443)
+    assert status == "unauthorized"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_returns_error_on_network_failure():
+    with patch.object(thief.requests, 'get',
+                      side_effect=requests.exceptions.ConnectTimeout("boom")):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "error"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_returns_ok_empty_when_no_devices():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML_NO_DEVICES)
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "bob", "pw", port=8443)
+    assert status == "ok"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_returns_error_on_unexpected_status():
+    fake_resp = MagicMock(status_code=403, text="Forbidden")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "error"
+    assert devices == []
+
+
+# ---------------------------------------------------------------------------
 # enumerate_devices_unauthenticated
 # ---------------------------------------------------------------------------
 
@@ -258,3 +310,18 @@ def test_download_uds_discovered_configs_handles_empty_list(db_path, monkeypatch
 
     assert count == 0
     assert called == []
+
+
+def test_download_uds_discovered_configs_no_db_skips_credential_logging(db_path, monkeypatch):
+    monkeypatch.setattr(thief, 'search_for_secrets',
+                        lambda host, filename, use_tftp=True: ([('admin', 'cisco', filename)], []))
+    logged = []
+    monkeypatch.setattr(thief, 'log_credentials_to_db',
+                        lambda *a, **kw: logged.append(a))
+
+    count = thief.download_uds_discovered_configs(
+        "cucm.example.com", ["SEP001122334455"], db_path, no_db=True,
+    )
+
+    assert count == 1          # still counts a hit
+    assert logged == []        # but never touches the DB
