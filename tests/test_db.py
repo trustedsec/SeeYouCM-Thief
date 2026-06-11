@@ -49,3 +49,30 @@ def test_log_download_and_credentials(tmp_path):
     assert user_row[1] == "device2"
     assert user_row[2] == "user2"
     conn.close()
+
+def test_get_mac_prefixes_from_db(tmp_path):
+    db_path = tmp_path / "test_thief.db"
+    thief.init_database(str(db_path))
+    # Two prefixes with CUCM hosts, plus one row with no CUCM that must be dropped.
+    thief.log_mac_prefix_to_db("10.0.0.1", "192.168.1.10", "AABBCCDDEE01", "AABBCCDDE", str(db_path))
+    thief.log_mac_prefix_to_db("10.0.0.2", "192.168.1.11", "112233445566", "112233445", str(db_path))
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT OR IGNORE INTO mac_prefixes (cucm_host, phone_ip, full_mac, partial_mac, discovery_time)"
+        " VALUES ('', '192.168.1.12', 'FFEEDDCCBBAA', 'FFEEDDCCB', '2024-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    rows = thief.get_mac_prefixes_from_db(str(db_path))
+    assert ("AABBCCDDEE01", "10.0.0.1") in rows
+    assert ("112233445566", "10.0.0.2") in rows
+    # Row without a CUCM host is excluded
+    assert all(cucm for _, cucm in rows)
+    assert len(rows) == 2
+
+def test_get_mac_prefixes_from_db_missing_table(tmp_path):
+    # An empty/blank DB file with no tables returns [] rather than raising.
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(db_path).close()
+    assert thief.get_mac_prefixes_from_db(str(db_path)) == []
