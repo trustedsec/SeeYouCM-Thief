@@ -65,6 +65,40 @@ def test_parse_uds_devices_ignores_non_sep_device_names():
 
 
 # ---------------------------------------------------------------------------
+# parse_uds_device_collection (/cucm-uds/user/{id}/devices shape)
+# ---------------------------------------------------------------------------
+
+UDS_DEVICE_COLLECTION_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<devices>
+  <device uri="https://cucm/cucm-uds/user/abc/device/1">
+    <id>1</id>
+    <name>SEP001122334455</name>
+    <model>Cisco 8845</model>
+    <description>alice desk</description>
+  </device>
+  <device uri="https://cucm/cucm-uds/user/abc/device/2">
+    <id>2</id>
+    <name>SEP667788990011</name>
+    <model>Cisco 7841</model>
+  </device>
+</devices>"""
+
+
+def test_parse_uds_device_collection_returns_sep_names():
+    assert thief.parse_uds_device_collection(UDS_DEVICE_COLLECTION_XML) == [
+        "SEP001122334455", "SEP667788990011"]
+
+
+def test_parse_uds_device_collection_empty_on_user_object_shape():
+    # The /user/{id} associatedDevices shape has no <name>SEP…</name> tags
+    assert thief.parse_uds_device_collection(UDS_USER_XML) == []
+
+
+def test_parse_uds_device_collection_empty_on_blank():
+    assert thief.parse_uds_device_collection("") == []
+
+
+# ---------------------------------------------------------------------------
 # uds_devices DB table
 # ---------------------------------------------------------------------------
 

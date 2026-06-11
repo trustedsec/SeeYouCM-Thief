@@ -851,6 +851,15 @@ def parse_uds_devices(xml_body):
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
 
 
+def parse_uds_device_collection(xml_body):
+    """Extract SEP device names from a /cucm-uds/user/{id}/devices response body.
+
+    That endpoint wraps each device in a <device> element with child fields; the
+    SEP name lives in <name>SEP…</name> (unlike the /user/{id} associatedDevices
+    shape, where it is the bare <device> text — see parse_uds_devices)."""
+    return re.findall(r'<name>(SEP[0-9A-Fa-f]{12})</name>', xml_body)
+
+
 def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db'):
     """Insert a (cucm_host, username, device_name) row into uds_devices; ignores duplicates."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
