@@ -922,6 +922,33 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
+def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10):
+    """
+    Authenticated UDS lookup: GET /cucm-uds/user/{username} as that end user
+    (HTTP Basic auth). This is the per-user, end-user-scoped endpoint — it does
+    not require CCM Admin / AXL privileges.
+
+    Returns (status, devices):
+      'ok'           — HTTP 200; devices is the parsed SEP list (may be empty).
+      'unauthorized' — HTTP 401; creds rejected. devices is [].
+      'error'        — network failure or other status. devices is [].
+    """
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+    dbg(f'UDS authed GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS authed {url} raised {type(e).__name__}: {e}')
+        return 'error', []
+    dbg(f'UDS authed {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+    if resp.status_code == 200:
+        return 'ok', parse_uds_devices(resp.text)
+    if resp.status_code == 401:
+        return 'unauthorized', []
+    dbg(f'UDS authed non-200/401 body (first 300 chars): {resp.text[:300]!r}')
+    return 'error', []
+
+
 def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True):
     """
     Download and parse SEP config files for devices discovered via UDS.
