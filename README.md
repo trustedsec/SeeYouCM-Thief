@@ -87,6 +87,8 @@ Authenticate to the UDS API with a single end-user credential, enumerate **all**
 
 Authorization reality: a standard end user can usually only read their own record, so on a strict server most users return *denied* and you mainly recover the authenticated user's own devices; on permissive or privileged setups you get the full set. The run prints an ok/denied/error tally so you can see how the server responded.
 
+For each user the sweep queries **both** `/cucm-uds/user/{id}` and `/cucm-uds/user/{id}/devices` and unions the SEP names, so a host that misconfigures authorization on one endpoint but not the other still yields devices. This roughly doubles the request volume per user — tune with `-T/--threads`.
+
 `--uds-devices` requires `-H/--host`, `--uds-user`, and `--uds-password`. It needs **only end-user credentials** — no CCM Admin or AXL access is required. It honors `--uds-port` (default: 8443), `--no-db`, and `-T/--threads` for sweep concurrency.
 
 ### Password Spray
