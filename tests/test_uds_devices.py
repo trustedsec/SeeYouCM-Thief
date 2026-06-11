@@ -228,8 +228,17 @@ def test_get_user_devices_authenticated_returns_error_on_unexpected_status():
 
 
 def test_get_user_devices_authenticated_unions_both_endpoints():
-    base_resp = MagicMock(status_code=200, text=UDS_USER_XML)
-    devices_resp = MagicMock(status_code=200, text=UDS_DEVICE_COLLECTION_XML)
+    # base returns one unique SEP; /devices returns a different one.
+    base_resp = MagicMock(
+        status_code=200,
+        text="<user><associatedDevices>"
+             "<device>SEP001122334455</device>"
+             "</associatedDevices></user>",
+    )
+    devices_resp = MagicMock(
+        status_code=200,
+        text="<devices><device><name>SEPAABBCCDDEEFF</name></device></devices>",
+    )
 
     def side_effect(url, **kwargs):
         return devices_resp if url.endswith('/devices') else base_resp
@@ -238,7 +247,8 @@ def test_get_user_devices_authenticated_unions_both_endpoints():
         status, devices = thief.get_user_devices_authenticated(
             "cucm.example.com", "alice", "pw", port=8443)
     assert status == "ok"
-    assert devices == ["SEP001122334455", "SEP667788990011"]
+    # base-endpoint SEP first, then /devices SEP, no duplicates
+    assert devices == ["SEP001122334455", "SEPAABBCCDDEEFF"]
     called = [c.args[0] for c in mock_get.call_args_list]
     assert "https://cucm.example.com:8443/cucm-uds/user/alice" in called
     assert "https://cucm.example.com:8443/cucm-uds/user/alice/devices" in called
