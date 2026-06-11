@@ -922,6 +922,62 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
+def enumerate_devices_authenticated(cucm_host, username, password, port, usernames,
+                                    db_file, threads=10, no_db=False, _probe_fn=None):
+    """
+    Query each target username's UDS devices using the single (username, password)
+    credential, in parallel. Logs found SEP names to uds_devices with
+    source='uds_auth' (recording the target username) unless no_db is True.
+
+    Returns:
+      {
+        'devices': {target_username: [SEP names]},  # only users with >=1 device
+        'ok': int,        # targets that returned HTTP 200
+        'denied': int,    # targets that returned 401
+        'errors': int,    # targets that returned an error/other status
+      }
+    _probe_fn(cucm_host, username, password, port, target_user) is injectable for
+    testing; defaults to get_user_devices_authenticated.
+    """
+    if _probe_fn is None:
+        def _probe_fn(c_host, c_user, c_pass, c_port, t_user):
+            return get_user_devices_authenticated(c_host, c_user, c_pass, port=c_port, target_user=t_user)
+
+    result = {'devices': {}, 'ok': 0, 'denied': 0, 'errors': 0}
+    lock = threading.Lock()
+    work = queue.Queue()
+    for u in usernames:
+        work.put(u)
+
+    def worker():
+        while True:
+            try:
+                target_user = work.get_nowait()
+            except queue.Empty:
+                return
+            status, devices = _probe_fn(cucm_host, username, password, port, target_user)
+            with lock:
+                if status == 'ok':
+                    result['ok'] += 1
+                    if devices:
+                        result['devices'][target_user] = devices
+                elif status == 'unauthorized':
+                    result['denied'] += 1
+                else:
+                    result['errors'] += 1
+            if status == 'ok' and devices and not no_db:
+                for device_name in devices:
+                    log_uds_device(cucm_host, target_user, device_name, 'uds_auth', db_file)
+
+    thread_list = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(max(1, min(threads, len(usernames))))]
+    for t in thread_list:
+        t.start()
+    for t in thread_list:
+        t.join()
+    return result
+
+
 def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10, target_user=None):
     """
     Authenticated UDS lookup: GET /cucm-uds/user/{target_user} authenticating as

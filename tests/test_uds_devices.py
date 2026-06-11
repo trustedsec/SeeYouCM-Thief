@@ -345,3 +345,65 @@ def test_download_uds_discovered_configs_no_db_skips_credential_logging(db_path,
 
     assert count == 1          # still counts a hit
     assert logged == []        # but never touches the DB
+
+
+# ---------------------------------------------------------------------------
+# enumerate_devices_authenticated
+# ---------------------------------------------------------------------------
+
+def test_enumerate_devices_authenticated_collects_per_user_and_tallies(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        if target_user == "alice":
+            return "ok", ["SEP001122334455"]
+        if target_user == "bob":
+            return "unauthorized", []
+        return "error", []
+
+    result = thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice", "bob", "carol"], db_path, threads=3,
+        _probe_fn=fake_probe,
+    )
+    assert result["devices"] == {"alice": ["SEP001122334455"]}
+    assert result["ok"] == 1
+    assert result["denied"] == 1
+    assert result["errors"] == 1
+
+
+def test_enumerate_devices_authenticated_logs_devices_with_uds_auth_source(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return ("ok", ["SEP001122334455"]) if target_user == "alice" else ("ok", [])
+
+    thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice", "bob"], db_path, threads=2,
+        _probe_fn=fake_probe,
+    )
+    rows = _rows(db_path, "SELECT username, device_name, source FROM uds_devices")
+    assert ("alice", "SEP001122334455", "uds_auth") in rows
+
+
+def test_enumerate_devices_authenticated_no_db_skips_logging(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return "ok", ["SEP001122334455"]
+
+    thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice"], db_path, threads=1, no_db=True,
+        _probe_fn=fake_probe,
+    )
+    rows = _rows(db_path, "SELECT COUNT(*) FROM uds_devices")
+    assert rows[0][0] == 0
+
+
+def test_enumerate_devices_authenticated_ok_with_no_devices_counts_ok_only(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return "ok", []
+
+    result = thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice"], db_path, threads=1,
+        _probe_fn=fake_probe,
+    )
+    assert result["ok"] == 1
+    assert result["devices"] == {}
