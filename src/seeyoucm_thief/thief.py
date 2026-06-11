@@ -2683,7 +2683,7 @@ def main():
         for device_name in devices:
             print(f'    {device_name}')
             if not no_db:
-                log_uds_device(CUCM_host, args.uds_user, device_name, 'uds_devices', db_file)
+                log_uds_device(CUCM_host, args.uds_user, device_name, 'uds_auth', db_file)
 
         hits = download_uds_discovered_configs(
             CUCM_host, devices, db_file, use_tftp=use_tftp, no_db=no_db,
