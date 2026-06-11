@@ -130,6 +130,26 @@ def test_get_user_devices_authenticated_returns_ok_and_devices_on_200():
     assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
 
 
+def test_get_user_devices_authenticated_queries_target_user_with_caller_auth():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "Summer2025!", port=8443, target_user="bob")
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+    # Path targets bob, but auth identity stays alice
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/bob"
+    assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
+
+
+def test_get_user_devices_authenticated_defaults_target_to_auth_user():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
+
+
 def test_get_user_devices_authenticated_returns_unauthorized_on_401():
     fake_resp = MagicMock(status_code=401, text="")
     with patch.object(thief.requests, 'get', return_value=fake_resp):

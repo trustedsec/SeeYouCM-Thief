@@ -922,18 +922,21 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
-def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10):
+def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10, target_user=None):
     """
-    Authenticated UDS lookup: GET /cucm-uds/user/{username} as that end user
-    (HTTP Basic auth). This is the per-user, end-user-scoped endpoint — it does
-    not require CCM Admin / AXL privileges.
+    Authenticated UDS lookup: GET /cucm-uds/user/{target_user} authenticating as
+    (username, password) via HTTP Basic auth. target_user defaults to username
+    (query your own record). Passing a different target_user queries another
+    user's record with the same credential — useful for sweeping all users with
+    one working credential; the server decides whether to authorize it.
 
     Returns (status, devices):
       'ok'           — HTTP 200; devices is the parsed SEP list (may be empty).
       'unauthorized' — HTTP 401; creds rejected. devices is [].
       'error'        — network failure or other status. devices is [].
     """
-    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+    target = target_user if target_user is not None else username
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(target, safe="")}'
     dbg(f'UDS authed GET {url} (timeout={timeout}s)')
     try:
         resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
