@@ -168,7 +168,7 @@ Export to CSV:
 - `-e, --enumsubnet`: Enumerate and attack subnet in CIDR notation
 
 ### Attack Options
-- `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone)
+- `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`)
 - `--force`: Bypass cache and force re-download of all configuration files
 - `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory)
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`

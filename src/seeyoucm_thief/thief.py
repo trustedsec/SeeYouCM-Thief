@@ -816,6 +816,36 @@ def get_known_cucm_hosts(db_file='thief.db'):
     return sorted(hosts)
 
 
+def get_mac_prefixes_from_db(db_file='thief.db'):
+    """
+    Return previously discovered MAC prefixes as a list of (full_mac, cucm_host)
+    tuples, newest first. Rows missing a full MAC or CUCM host are dropped since
+    brute force needs both. Lets --brute-mac run without -p by reusing phones
+    discovered on an earlier scan.
+    """
+    rows = []
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                SELECT full_mac, cucm_host
+                FROM mac_prefixes
+                ORDER BY discovery_time DESC
+            ''')
+            for full_mac, cucm_host in cursor.fetchall():
+                if full_mac and cucm_host:
+                    rows.append((full_mac.upper(), cucm_host))
+        except sqlite3.OperationalError as e:
+            if 'no such table' not in str(e):
+                raise
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_mac_prefixes_from_db error: {e}')
+    return rows
+
+
 def parse_uds_devices(xml_body):
     """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
@@ -2637,16 +2667,33 @@ def main():
 
     # Handle MAC brute forcing from detected phones
     if brute_mac:
-        if not phones:
-            print('You must specify at least one phone with -p when using --brute-mac')
-            quit(1)
-        
-        print(f'MAC brute force mode enabled for {len(phones)} phone(s) with suffix length {brute_mac_len}\n')
-        
         # Map each MAC prefix to its CUCM server
         mac_to_cucm = {}
         all_found_macs = set()
-        
+
+        if phones:
+            print(f'MAC brute force mode enabled for {len(phones)} phone(s) with suffix length {brute_mac_len}\n')
+        else:
+            # No phones supplied: reuse MAC prefixes discovered on a previous scan.
+            db_prefixes = [] if no_db else get_mac_prefixes_from_db(db_file)
+            if CUCM_host:
+                db_prefixes = [(fm, c) for fm, c in db_prefixes if c == CUCM_host]
+            if not db_prefixes:
+                print('You must specify at least one phone with -p when using --brute-mac')
+                if not no_db:
+                    print('  (and no previously discovered phones were found in the database)')
+                quit(1)
+            prefix_len = 12 - brute_mac_len
+            if prefix_len < 0:
+                print(f'Invalid brute_mac_len: {brute_mac_len} (must be <= 12)')
+                quit(1)
+            for full_mac, cucm in db_prefixes:
+                partial_mac = full_mac[:prefix_len]
+                all_found_macs.add(partial_mac)
+                mac_to_cucm[partial_mac] = CUCM_host or cucm
+            print(f'MAC brute force mode enabled using {len(all_found_macs)} MAC '
+                  f'prefix(es) from the database with suffix length {brute_mac_len}\n')
+
         # Detect MACs and CUCM from each phone (parallel)
         counts = {"success": 0, "fail": 0}
         detect_lock = threading.Lock()
@@ -2747,7 +2794,8 @@ def main():
             for t in detect_threads:
                 t.join()
         
-        print(f'Phone detection complete: {counts["success"]} succeeded, {counts["fail"]} failed\n')
+        if phones:
+            print(f'Phone detection complete: {counts["success"]} succeeded, {counts["fail"]} failed\n')
         
         if not all_found_macs:
             print('No MAC addresses detected. Cannot proceed with brute force.')
