@@ -1157,6 +1157,9 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         log_spray_attempt(cucm_host, username, effective_password, status_code, error, db_file)
 
         if status_code == 200 and resp is not None:
+            # Spray hits only the base /cucm-uds/user/{id} endpoint, so the
+            # associatedDevices parser is correct here (device discovery's
+            # two-endpoint union lives in get_user_devices_authenticated).
             for device_name in parse_uds_devices(resp.text):
                 log_uds_device(cucm_host, username, device_name, 'spray_hit', db_file)
 

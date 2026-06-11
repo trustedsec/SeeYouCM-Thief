@@ -268,6 +268,20 @@ def test_get_user_devices_authenticated_ok_when_only_devices_endpoint_authorized
     assert devices == ["SEP001122334455", "SEP667788990011"]
 
 
+def test_get_user_devices_authenticated_ok_when_only_base_endpoint_authorized():
+    base_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    devices_resp = MagicMock(status_code=401, text="")
+
+    def side_effect(url, **kwargs):
+        return devices_resp if url.endswith('/devices') else base_resp
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+
+
 def test_get_user_devices_authenticated_unauthorized_only_when_neither_ok():
     resp401 = MagicMock(status_code=401, text="")
     with patch.object(thief.requests, 'get', return_value=resp401):
