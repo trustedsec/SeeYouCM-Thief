@@ -130,6 +130,26 @@ def test_get_user_devices_authenticated_returns_ok_and_devices_on_200():
     assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
 
 
+def test_get_user_devices_authenticated_queries_target_user_with_caller_auth():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "Summer2025!", port=8443, target_user="bob")
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+    # Path targets bob, but auth identity stays alice
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/bob"
+    assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
+
+
+def test_get_user_devices_authenticated_defaults_target_to_auth_user():
+    fake_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
+        thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
+
+
 def test_get_user_devices_authenticated_returns_unauthorized_on_401():
     fake_resp = MagicMock(status_code=401, text="")
     with patch.object(thief.requests, 'get', return_value=fake_resp):
@@ -325,3 +345,65 @@ def test_download_uds_discovered_configs_no_db_skips_credential_logging(db_path,
 
     assert count == 1          # still counts a hit
     assert logged == []        # but never touches the DB
+
+
+# ---------------------------------------------------------------------------
+# enumerate_devices_authenticated
+# ---------------------------------------------------------------------------
+
+def test_enumerate_devices_authenticated_collects_per_user_and_tallies(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        if target_user == "alice":
+            return "ok", ["SEP001122334455"]
+        if target_user == "bob":
+            return "unauthorized", []
+        return "error", []
+
+    result = thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice", "bob", "carol"], db_path, threads=3,
+        _probe_fn=fake_probe,
+    )
+    assert result["devices"] == {"alice": ["SEP001122334455"]}
+    assert result["ok"] == 1
+    assert result["denied"] == 1
+    assert result["errors"] == 1
+
+
+def test_enumerate_devices_authenticated_logs_devices_with_uds_auth_source(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return ("ok", ["SEP001122334455"]) if target_user == "alice" else ("ok", [])
+
+    thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice", "bob"], db_path, threads=2,
+        _probe_fn=fake_probe,
+    )
+    rows = _rows(db_path, "SELECT username, device_name, source FROM uds_devices")
+    assert ("alice", "SEP001122334455", "uds_auth") in rows
+
+
+def test_enumerate_devices_authenticated_no_db_skips_logging(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return "ok", ["SEP001122334455"]
+
+    thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice"], db_path, threads=1, no_db=True,
+        _probe_fn=fake_probe,
+    )
+    rows = _rows(db_path, "SELECT COUNT(*) FROM uds_devices")
+    assert rows[0][0] == 0
+
+
+def test_enumerate_devices_authenticated_ok_with_no_devices_counts_ok_only(db_path):
+    def fake_probe(cucm_host, username, password, port, target_user):
+        return "ok", []
+
+    result = thief.enumerate_devices_authenticated(
+        "cucm.example.com", "alice", "pw", 8443,
+        ["alice"], db_path, threads=1,
+        _probe_fn=fake_probe,
+    )
+    assert result["ok"] == 1
+    assert result["devices"] == {}

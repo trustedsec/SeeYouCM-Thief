@@ -79,13 +79,15 @@ Extract usernames via CUCM UDS API:
 
 ### Authenticated Device Discovery
 
-Authenticate to the UDS API as a single end user, enumerate that user's associated SEP devices, then download and parse their config files for credentials:
+Authenticate to the UDS API with a single end-user credential, enumerate **all** users from `/cucm-uds/users`, then query each user's associated SEP devices with that one credential. The discovered SEPs are deduped, and every config is downloaded and parsed for credentials:
 
 ```bash
 ./thief.py -H <CUCM Server> --uds-devices --uds-user jdoe --uds-password 'Passw0rd!'
 ```
 
-`--uds-devices` requires `-H/--host`, `--uds-user`, and `--uds-password`. It needs **only end-user credentials** — no CCM Admin or AXL access is required. It honors `--uds-port` (default: 8443) and `--no-db`.
+Authorization reality: a standard end user can usually only read their own record, so on a strict server most users return *denied* and you mainly recover the authenticated user's own devices; on permissive or privileged setups you get the full set. The run prints an ok/denied/error tally so you can see how the server responded.
+
+`--uds-devices` requires `-H/--host`, `--uds-user`, and `--uds-password`. It needs **only end-user credentials** — no CCM Admin or AXL access is required. It honors `--uds-port` (default: 8443), `--no-db`, and `-T/--threads` for sweep concurrency.
 
 ### Password Spray
 
@@ -184,7 +186,7 @@ Export to CSV:
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
 - `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)
-- `--uds-devices`: Authenticate to the UDS API as a single end user, enumerate that user's associated SEP devices, and download + parse their configs (requires `-H`, `--uds-user`, and `--uds-password`; needs only end-user credentials — no admin/AXL access)
+- `--uds-devices`: Authenticate to the UDS API with one end-user credential, enumerate **all** users, query each user's associated SEP devices with that credential, then dedupe and download + parse every discovered config (requires `-H`, `--uds-user`, and `--uds-password`; needs only end-user credentials — no admin/AXL access; prints an ok/denied/error tally)
 - `--uds-user USERNAME`: End-user username for `--uds-devices` authentication
 - `--uds-password PASSWORD`: End-user password for `--uds-devices` authentication
 - `--spray`: Password-spray the UDS API (requires `-H`; mutually exclusive with `--brute-mac`)
