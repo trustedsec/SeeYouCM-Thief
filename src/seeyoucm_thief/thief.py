@@ -2371,7 +2371,8 @@ def main():
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
-    parser.add_argument('--uds-port', type=int, default=UDS_PORT, help=f'CUCM UDS API HTTPS port for --userenum (default: {UDS_PORT})')
+    parser.add_argument('--uds-port', type=int, default=UDS_PORT,
+                        help=f'CUCM UDS API HTTPS port for UDS-based features (--userenum, --servers, --uds-devices; default: {UDS_PORT})')
     parser.add_argument('--uds-devices', action='store_true', default=False,
                         help='Discover SEP devices associated with a single end user via authenticated UDS, then download + parse their configs (requires -H, --uds-user, --uds-password; no admin privileges needed)')
     parser.add_argument('--uds-user', type=str, default=None,
@@ -2664,7 +2665,7 @@ def main():
             quit(1)
 
         print(f'Discovering devices for user {args.uds_user!r} via '
-              f'https://{CUCM_host}:{args.uds_port}/cucm-uds/user/{args.uds_user}')
+              f'https://{CUCM_host}:{args.uds_port}/cucm-uds/user/{quote(args.uds_user, safe="")}')
         status, devices = get_user_devices_authenticated(
             CUCM_host, args.uds_user, args.uds_password, port=args.uds_port,
         )
