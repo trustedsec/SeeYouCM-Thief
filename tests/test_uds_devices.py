@@ -127,6 +127,7 @@ def test_get_user_devices_authenticated_returns_ok_and_devices_on_200():
     assert devices == ["SEP001122334455", "SEP667788990011"]
     # Must send Basic auth as the end user
     assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
+    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
 
 
 def test_get_user_devices_authenticated_returns_unauthorized_on_401():
@@ -153,6 +154,15 @@ def test_get_user_devices_authenticated_returns_ok_empty_when_no_devices():
         status, devices = thief.get_user_devices_authenticated(
             "cucm.example.com", "bob", "pw", port=8443)
     assert status == "ok"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_returns_error_on_unexpected_status():
+    fake_resp = MagicMock(status_code=403, text="Forbidden")
+    with patch.object(thief.requests, 'get', return_value=fake_resp):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "error"
     assert devices == []
 
 
