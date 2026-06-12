@@ -736,6 +736,61 @@ def record_uds_users(cucm_host, usernames, db_file='thief.db'):
         return 0
 
 
+def record_uds_directory(cucm_host, records, db_file='thief.db'):
+    """
+    Upsert harvested UDS directory records into the uds_directory table.
+
+    Each record is the dict shape produced by parse_uds_directory. On conflict
+    (same cucm_host + username), refreshes all field columns and last_seen but
+    preserves first_seen. Returns the number of rows inserted/updated.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        written = 0
+        for r in records:
+            cursor.execute('''
+                INSERT INTO uds_directory
+                    (cucm_host, username, first_name, middle_name, last_name,
+                     display_name, phone_number, home_number, mobile_number,
+                     email, ms_uri, department, title, manager, user_id,
+                     first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cucm_host, username) DO UPDATE SET
+                    first_name=excluded.first_name,
+                    middle_name=excluded.middle_name,
+                    last_name=excluded.last_name,
+                    display_name=excluded.display_name,
+                    phone_number=excluded.phone_number,
+                    home_number=excluded.home_number,
+                    mobile_number=excluded.mobile_number,
+                    email=excluded.email,
+                    ms_uri=excluded.ms_uri,
+                    department=excluded.department,
+                    title=excluded.title,
+                    manager=excluded.manager,
+                    user_id=excluded.user_id,
+                    last_seen=excluded.last_seen
+            ''', (
+                cucm_host, r.get('username', ''), r.get('first_name', ''),
+                r.get('middle_name', ''), r.get('last_name', ''),
+                r.get('display_name', ''), r.get('phone_number', ''),
+                r.get('home_number', ''), r.get('mobile_number', ''),
+                r.get('email', ''), r.get('ms_uri', ''), r.get('department', ''),
+                r.get('title', ''), r.get('manager', ''), r.get('user_id', ''),
+                timestamp, timestamp,
+            ))
+            written += 1
+        conn.commit()
+        conn.close()
+        return written
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] record_uds_directory error: {e}')
+        return 0
+
+
 def log_spray_attempt(cucm_host, username, password, status_code, error, db_file='thief.db'):
     """
     Append a row to spray_attempts. Retries with exponential backoff on
@@ -1633,6 +1688,31 @@ def init_database(db_file='thief.db'):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cucm_host TEXT NOT NULL,
             username TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(cucm_host, username)
+        )
+    ''')
+
+    # Create table for the full UDS corporate-directory harvest (--userenum)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_directory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            first_name TEXT,
+            middle_name TEXT,
+            last_name TEXT,
+            display_name TEXT,
+            phone_number TEXT,
+            home_number TEXT,
+            mobile_number TEXT,
+            email TEXT,
+            ms_uri TEXT,
+            department TEXT,
+            title TEXT,
+            manager TEXT,
+            user_id TEXT,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             UNIQUE(cucm_host, username)

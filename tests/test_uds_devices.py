@@ -497,3 +497,42 @@ def test_get_user_directory_api_assembles_records_across_pages():
     assert [r["username"] for r in records] == ["alice", "bob"]
     assert records[0]["email"] == "alice@corp.example"
     assert records[1]["department"] == "IT"
+
+
+# ---------------------------------------------------------------------------
+# uds_directory table + record_uds_directory
+# ---------------------------------------------------------------------------
+
+def test_init_database_creates_uds_directory_table(db_path):
+    import sqlite3 as _sq
+    conn = _sq.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(uds_directory)").fetchall()}
+    conn.close()
+    assert {"cucm_host", "username", "first_name", "last_name", "display_name",
+            "phone_number", "email", "department", "title", "manager", "user_id",
+            "first_seen", "last_seen"} <= cols
+
+
+def test_record_uds_directory_inserts_rows(db_path):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    thief.record_uds_directory("cucm.example.com", recs, db_path)
+    rows = _rows(db_path, "SELECT username, email, department FROM uds_directory")
+    assert rows == [("alice", "alice@corp.example", "Finance")]
+
+
+def test_record_uds_directory_upserts_without_duplicates(db_path):
+    rec = {'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+           'last_name': 'Smith', 'display_name': '', 'phone_number': '1001',
+           'home_number': '', 'mobile_number': '', 'email': 'old@corp.example',
+           'ms_uri': '', 'department': '', 'title': '', 'manager': '',
+           'user_id': 'uuid-alice'}
+    thief.record_uds_directory("cucm.example.com", [rec], db_path)
+    rec2 = dict(rec, email="new@corp.example")
+    thief.record_uds_directory("cucm.example.com", [rec2], db_path)
+    rows = _rows(db_path, "SELECT COUNT(*), MAX(email) FROM uds_directory WHERE username='alice'")
+    assert rows[0][0] == 1
+    assert rows[0][1] == "new@corp.example"
