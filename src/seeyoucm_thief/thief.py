@@ -1602,6 +1602,20 @@ def export_directory_to_csv(records, filename):
             writer.writerow([r.get(col, '') for col in _DIRECTORY_CSV_COLUMNS])
 
 
+def print_directory_table(records):
+    """Print a console summary of harvested UDS directory records:
+    username | extension (phoneNumber) | display name. Display name falls back
+    to 'first last' when displayName is empty."""
+    print("-" * 70)
+    print(f'{"Username":<20} {"Extension":<12} {"Name"}')
+    print("-" * 70)
+    for r in records:
+        name = r.get('display_name') or ' '.join(
+            p for p in (r.get('first_name', ''), r.get('last_name', '')) if p
+        )
+        print(f'{r.get("username", ""):<20} {r.get("phone_number", ""):<12} {name}')
+
+
 def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
     """
     Export discovered credentials and usernames to CSV file
