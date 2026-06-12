@@ -31,6 +31,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HTTP_TFTP_PORT = 6970
 # CUCM User Data Services (UDS) API — HTTPS only, default 8443
 UDS_PORT = 8443
+# Default output file for the standalone --directory harvest
+DEFAULT_DIRECTORY_OUTFILE = 'cucm_directory.csv'
 # Well-known default filenames the CUCM TFTP service hosts in addition to
 # per-device SEP<MAC>.cnf.xml configs. Always attempted so we can surface
 # firmware versions, trust-list presence, Jabber bootstrap config, etc.
@@ -2683,6 +2685,10 @@ def main():
     parser.add_argument('-T','--threads', type=int, default=40, help='Number of worker threads for brute force mode (default: 40)')
     parser.add_argument('--force', action='store_true', default=False, help='Bypass cache and force re-download of all configuration files')
     parser.add_argument('--userenum', action='store_true', default=False, help='Extract usernames via CUCM User Data Services (UDS) API')
+    parser.add_argument('--directory', action='store_true', default=False,
+                        help='Harvest the unauthenticated UDS corporate directory (users + extensions + contact fields) and exit. Always writes a CSV and prints a summary table. Requires -H.')
+    parser.add_argument('--directory-outfile', type=str, default=DEFAULT_DIRECTORY_OUTFILE, metavar='FILENAME',
+                        help=f'Output CSV for --directory (default: {DEFAULT_DIRECTORY_OUTFILE})')
     parser.add_argument('--servers', action='store_true', default=False, help='Enumerate the CUCM cluster topology via UDS /cucm-uds/servers (requires -H)')
     parser.add_argument('--http', action='store_true', default=False, help='Use HTTP (port 6970) as the primary download protocol, with TFTP fallback (default: TFTP first, HTTP fallback)')
     parser.add_argument('--uds-port', type=int, default=UDS_PORT,
@@ -2942,6 +2948,24 @@ def main():
         if not no_db:
             inserted = log_cluster_servers_to_db(CUCM_host, servers, db_file)
             print(f'[+] Logged {inserted} new cluster server entry/entries to database')
+        quit(0)
+
+    if args.directory:
+        if not CUCM_host:
+            print('--directory requires -H/--host to specify the CUCM server')
+            quit(1)
+        print(f'Harvesting UDS directory from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
+        records = get_user_directory_api(CUCM_host, port=args.uds_port)
+        if not records:
+            print('[-] No directory records returned. Re-run with -d for request/response details.')
+            quit(0)
+        print(f'[+] Retrieved {len(records)} directory record(s):')
+        print_directory_table(records)
+        if not no_db:
+            written = record_uds_directory(CUCM_host, records, db_file)
+            print(f'[+] Stored {written} directory record(s) in database')
+        export_directory_to_csv(records, args.directory_outfile)
+        print(f'[+] Directory written to {args.directory_outfile}')
         quit(0)
 
     if args.userenum:
