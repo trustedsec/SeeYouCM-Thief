@@ -583,6 +583,61 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     return users
 
 
+# Maps uds_directory dict keys -> the UDS <element> name inside a <user> block.
+_UDS_DIRECTORY_FIELDS = (
+    ('first_name', 'firstName'),
+    ('middle_name', 'middleName'),
+    ('last_name', 'lastName'),
+    ('display_name', 'displayName'),
+    ('phone_number', 'phoneNumber'),
+    ('home_number', 'homeNumber'),
+    ('mobile_number', 'mobileNumber'),
+    ('email', 'email'),
+    ('ms_uri', 'msUri'),
+    ('department', 'department'),
+    ('title', 'title'),
+    ('manager', 'manager'),
+    ('user_id', 'id'),
+)
+
+
+def parse_uds_directory(xml_body):
+    """Return a list of dicts, one per <user> block in a /cucm-uds/users page.
+
+    Keys: username, first_name, middle_name, last_name, display_name,
+    phone_number, home_number, mobile_number, email, ms_uri, department, title,
+    manager, user_id. Missing fields are '' (empty string). A <user> with no
+    <userName> is skipped."""
+    records = []
+    for block in re.findall(r'<user\b[^>]*>(.*?)</user>', xml_body, re.DOTALL):
+        name_match = re.search(r'<userName>([^<]+)</userName>', block)
+        if not name_match:
+            continue
+        record = {'username': name_match.group(1).strip()}
+        for key, tag in _UDS_DIRECTORY_FIELDS:
+            m = re.search(rf'<{tag}>([^<]*)</{tag}>', block)
+            record[key] = m.group(1).strip() if m else ''
+        records.append(record)
+    return records
+
+
+def get_user_directory_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    """Full corporate-directory records from /cucm-uds/users via the shared page
+    iterator. Returns a list of dicts (see parse_uds_directory)."""
+    if _TEST_MODE:
+        return [
+            {'username': 'testuser1', 'first_name': 'Test', 'middle_name': '',
+             'last_name': 'One', 'display_name': 'Test One', 'phone_number': '1001',
+             'home_number': '', 'mobile_number': '', 'email': 'testuser1@corp.test',
+             'ms_uri': '', 'department': 'IT', 'title': '', 'manager': '',
+             'user_id': 'uuid-testuser1'},
+        ]
+    records = []
+    for body in _iter_uds_user_pages(cucm_host, port, timeout, max_pages):
+        records.extend(parse_uds_directory(body))
+    return records
+
+
 def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
     if _TEST_MODE:
         return [{'hostName': 'cucm-pub.test', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'}]

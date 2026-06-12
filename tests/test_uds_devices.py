@@ -425,3 +425,75 @@ def test_iter_uds_user_pages_yields_each_page_body():
     with patch.object(thief.requests, 'get', side_effect=side_effect):
         bodies = list(thief._iter_uds_user_pages("cucm.example.com", 8443))
     assert bodies == [page1, page2]
+
+
+# ---------------------------------------------------------------------------
+# parse_uds_directory
+# ---------------------------------------------------------------------------
+
+UDS_DIRECTORY_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<users totalCount="2">
+  <user>
+    <id>uuid-alice</id>
+    <userName>alice</userName>
+    <firstName>Alice</firstName>
+    <lastName>Smith</lastName>
+    <displayName>Alice Smith</displayName>
+    <phoneNumber>1001</phoneNumber>
+    <email>alice@corp.example</email>
+    <department>Finance</department>
+    <title>Analyst</title>
+    <manager>bob</manager>
+  </user>
+  <user>
+    <id>uuid-bob</id>
+    <userName>bob</userName>
+    <firstName>Bob</firstName>
+  </user>
+</users>"""
+
+
+def test_parse_uds_directory_extracts_all_fields():
+    records = thief.parse_uds_directory(UDS_DIRECTORY_XML)
+    assert records[0] == {
+        "username": "alice", "first_name": "Alice", "middle_name": "",
+        "last_name": "Smith", "display_name": "Alice Smith",
+        "phone_number": "1001", "home_number": "", "mobile_number": "",
+        "email": "alice@corp.example", "ms_uri": "", "department": "Finance",
+        "title": "Analyst", "manager": "bob", "user_id": "uuid-alice",
+    }
+
+
+def test_parse_uds_directory_missing_fields_are_empty():
+    records = thief.parse_uds_directory(UDS_DIRECTORY_XML)
+    assert records[1]["username"] == "bob"
+    assert records[1]["first_name"] == "Bob"
+    assert records[1]["last_name"] == ""
+    assert records[1]["email"] == ""
+
+
+def test_parse_uds_directory_skips_user_without_username():
+    xml = "<users><user><firstName>NoName</firstName></user></users>"
+    assert thief.parse_uds_directory(xml) == []
+
+
+def test_parse_uds_directory_empty_body():
+    assert thief.parse_uds_directory("") == []
+
+
+def test_get_user_directory_api_assembles_records_across_pages():
+    page1 = ('<users totalCount="2"><user><userName>alice</userName>'
+             '<email>alice@corp.example</email></user></users>')
+    page2 = ('<users totalCount="2"><user><userName>bob</userName>'
+             '<department>IT</department></user></users>')
+    responses = [MagicMock(status_code=200, text=page1),
+                 MagicMock(status_code=200, text=page2)]
+
+    def side_effect(url, **kwargs):
+        return responses.pop(0)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        records = thief.get_user_directory_api("cucm.example.com", port=8443)
+    assert [r["username"] for r in records] == ["alice", "bob"]
+    assert records[0]["email"] == "alice@corp.example"
+    assert records[1]["department"] == "IT"
