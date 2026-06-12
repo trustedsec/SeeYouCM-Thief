@@ -567,10 +567,13 @@ UDS_DIRECTORY_XML = """<?xml version="1.0" encoding="UTF-8"?>
     <id>uuid-alice</id>
     <userName>alice</userName>
     <firstName>Alice</firstName>
+    <nickName>Ally</nickName>
     <lastName>Smith</lastName>
     <displayName>Alice Smith</displayName>
     <phoneNumber>1001</phoneNumber>
+    <pager>5551234</pager>
     <email>alice@corp.example</email>
+    <directoryUri>alice@corp.example</directoryUri>
     <department>Finance</department>
     <title>Analyst</title>
     <manager>bob</manager>
@@ -587,10 +590,12 @@ def test_parse_uds_directory_extracts_all_fields():
     records = thief.parse_uds_directory(UDS_DIRECTORY_XML)
     assert records[0] == {
         "username": "alice", "first_name": "Alice", "middle_name": "",
-        "last_name": "Smith", "display_name": "Alice Smith",
+        "nick_name": "Ally", "last_name": "Smith", "display_name": "Alice Smith",
         "phone_number": "1001", "home_number": "", "mobile_number": "",
-        "email": "alice@corp.example", "ms_uri": "", "department": "Finance",
-        "title": "Analyst", "manager": "bob", "user_id": "uuid-alice",
+        "pager": "5551234", "email": "alice@corp.example",
+        "directory_uri": "alice@corp.example", "ms_uri": "",
+        "department": "Finance", "title": "Analyst", "manager": "bob",
+        "user_id": "uuid-alice",
     }
 
 
@@ -688,10 +693,10 @@ def test_export_directory_to_csv_writes_header_and_rows(tmp_path):
     thief.export_directory_to_csv(recs, str(out))
     text = out.read_text()
     lines = text.strip().splitlines()
-    assert lines[0] == ("username,first_name,middle_name,last_name,display_name,"
-                        "phone_number,home_number,mobile_number,email,ms_uri,"
-                        "department,title,manager,user_id")
-    assert lines[1].startswith("alice,Alice,,Smith,Alice Smith,1001,")
+    assert lines[0] == ("username,first_name,middle_name,nick_name,last_name,"
+                        "display_name,phone_number,home_number,mobile_number,pager,"
+                        "email,directory_uri,ms_uri,department,title,manager,user_id")
+    assert lines[1].startswith("alice,Alice,,,Smith,Alice Smith,1001,")
     assert "alice@corp.example" in lines[1]
 
 

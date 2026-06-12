@@ -77,14 +77,16 @@ Extract usernames via CUCM UDS API:
 ./thief.py -H <CUCM Server> --userenum
 ```
 
-`--userenum` also harvests the full corporate directory from `/cucm-uds/users` — names, phone numbers, email, department, title, manager, and the per-user UUID — and stores it in the database (`uds_directory` table). This is the same anonymously-readable data phones use for the Directory button, so it works without credentials. View it later with `--show-db`. The directory is always written to `cucm_directory.csv` (override with `--directory-outfile`).
+`--userenum` also harvests the full corporate directory from `/cucm-uds/users` — names (including nickname), phone/home/mobile/pager numbers, email, directory URI, MS URI, department, title, manager, and the per-user UUID — and stores it in the database (`uds_directory` table). This is the same anonymously-readable data phones use for the Directory button, so it works without credentials. View it later with `--show-db`. The directory is always written to `cucm_directory.csv` (override with `--directory-outfile`).
 
 ### Harvest the unauthenticated directory (`--directory`)
 
-Pull the CUCM corporate directory (usernames, extensions, and contact fields
-such as email, department, title, home/mobile numbers) from the unauthenticated
-UDS endpoint `/cucm-uds/users`, without the device probing, config downloads, or
-password spraying that `--userenum` performs.
+Pull the CUCM corporate directory from the unauthenticated UDS endpoint
+`/cucm-uds/users`, without the device probing, config downloads, or password
+spraying that `--userenum` performs. Every field the endpoint exposes is
+captured: username, first/middle/last/nick/display name, extension
+(`phoneNumber`), home/mobile/pager numbers, email, directory URI, MS URI,
+department, title, manager, and the per-user UUID.
 
 ```bash
 uv run thief --directory -H <cucm-host>
@@ -206,7 +208,7 @@ Export to CSV:
 ### Attack Options
 - `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`)
 - `--force`: Bypass cache and force re-download of all configuration files
-- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names, phone numbers, email, department, title, manager, UUID) into the `uds_directory` table; always writes `cucm_directory.csv` (override with `--directory-outfile`)
+- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names incl. nickname, phone/home/mobile/pager numbers, email, directory URI, MS URI, department, title, manager, UUID) into the `uds_directory` table; always writes `cucm_directory.csv` (override with `--directory-outfile`)
 - `--directory`: Harvest the unauthenticated CUCM corporate directory from `/cucm-uds/users` without any device probing or config downloads — requires `-H`; always writes `cucm_directory.csv` (override with `--directory-outfile`), prints a console table, and stores to `uds_directory` unless `--no-db`
 - `--directory-outfile FILENAME`: Override the default CSV output path for `--directory` and `--userenum` (default: `cucm_directory.csv`)
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`

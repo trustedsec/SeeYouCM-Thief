@@ -589,12 +589,15 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
 _UDS_DIRECTORY_FIELDS = (
     ('first_name', 'firstName'),
     ('middle_name', 'middleName'),
+    ('nick_name', 'nickName'),
     ('last_name', 'lastName'),
     ('display_name', 'displayName'),
     ('phone_number', 'phoneNumber'),
     ('home_number', 'homeNumber'),
     ('mobile_number', 'mobileNumber'),
+    ('pager', 'pager'),
     ('email', 'email'),
+    ('directory_uri', 'directoryUri'),
     ('ms_uri', 'msUri'),
     ('department', 'department'),
     ('title', 'title'),
@@ -606,10 +609,10 @@ _UDS_DIRECTORY_FIELDS = (
 def parse_uds_directory(xml_body):
     """Return a list of dicts, one per <user> block in a /cucm-uds/users page.
 
-    Keys: username, first_name, middle_name, last_name, display_name,
-    phone_number, home_number, mobile_number, email, ms_uri, department, title,
-    manager, user_id. Missing fields are '' (empty string). A <user> with no
-    <userName> is skipped."""
+    Keys: username, first_name, middle_name, nick_name, last_name,
+    display_name, phone_number, home_number, mobile_number, pager, email,
+    directory_uri, ms_uri, department, title, manager, user_id. Missing fields
+    are '' (empty string). A <user> with no <userName> is skipped."""
     records = []
     for block in re.findall(r'<user\b[^>]*>(.*?)</user>', xml_body, re.DOTALL):
         name_match = re.search(r'<userName>([^<]+)</userName>', block)
@@ -629,8 +632,9 @@ def get_user_directory_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000
     if _TEST_MODE:
         return [
             {'username': 'testuser1', 'first_name': 'Test', 'middle_name': '',
-             'last_name': 'One', 'display_name': 'Test One', 'phone_number': '1001',
-             'home_number': '', 'mobile_number': '', 'email': 'testuser1@corp.test',
+             'nick_name': '', 'last_name': 'One', 'display_name': 'Test One',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'pager': '', 'email': 'testuser1@corp.test', 'directory_uri': 'testuser1@corp.test',
              'ms_uri': '', 'department': 'IT', 'title': '', 'manager': '',
              'user_id': 'uuid-testuser1'},
         ]
@@ -754,20 +758,24 @@ def record_uds_directory(cucm_host, records, db_file='thief.db'):
         for r in records:
             cursor.execute('''
                 INSERT INTO uds_directory
-                    (cucm_host, username, first_name, middle_name, last_name,
-                     display_name, phone_number, home_number, mobile_number,
-                     email, ms_uri, department, title, manager, user_id,
+                    (cucm_host, username, first_name, middle_name, nick_name,
+                     last_name, display_name, phone_number, home_number,
+                     mobile_number, pager, email, directory_uri, ms_uri,
+                     department, title, manager, user_id,
                      first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cucm_host, username) DO UPDATE SET
                     first_name=excluded.first_name,
                     middle_name=excluded.middle_name,
+                    nick_name=excluded.nick_name,
                     last_name=excluded.last_name,
                     display_name=excluded.display_name,
                     phone_number=excluded.phone_number,
                     home_number=excluded.home_number,
                     mobile_number=excluded.mobile_number,
+                    pager=excluded.pager,
                     email=excluded.email,
+                    directory_uri=excluded.directory_uri,
                     ms_uri=excluded.ms_uri,
                     department=excluded.department,
                     title=excluded.title,
@@ -776,10 +784,12 @@ def record_uds_directory(cucm_host, records, db_file='thief.db'):
                     last_seen=excluded.last_seen
             ''', (
                 cucm_host, r.get('username', ''), r.get('first_name', ''),
-                r.get('middle_name', ''), r.get('last_name', ''),
-                r.get('display_name', ''), r.get('phone_number', ''),
-                r.get('home_number', ''), r.get('mobile_number', ''),
-                r.get('email', ''), r.get('ms_uri', ''), r.get('department', ''),
+                r.get('middle_name', ''), r.get('nick_name', ''),
+                r.get('last_name', ''), r.get('display_name', ''),
+                r.get('phone_number', ''), r.get('home_number', ''),
+                r.get('mobile_number', ''), r.get('pager', ''),
+                r.get('email', ''), r.get('directory_uri', ''),
+                r.get('ms_uri', ''), r.get('department', ''),
                 r.get('title', ''), r.get('manager', ''), r.get('user_id', ''),
                 timestamp, timestamp,
             ))
@@ -1581,9 +1591,10 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
     return credentials, usernames
 
 _DIRECTORY_CSV_COLUMNS = (
-    'username', 'first_name', 'middle_name', 'last_name', 'display_name',
-    'phone_number', 'home_number', 'mobile_number', 'email', 'ms_uri',
-    'department', 'title', 'manager', 'user_id',
+    'username', 'first_name', 'middle_name', 'nick_name', 'last_name',
+    'display_name', 'phone_number', 'home_number', 'mobile_number', 'pager',
+    'email', 'directory_uri', 'ms_uri', 'department', 'title', 'manager',
+    'user_id',
 )
 
 
@@ -1782,12 +1793,15 @@ def init_database(db_file='thief.db'):
             username TEXT NOT NULL,
             first_name TEXT,
             middle_name TEXT,
+            nick_name TEXT,
             last_name TEXT,
             display_name TEXT,
             phone_number TEXT,
             home_number TEXT,
             mobile_number TEXT,
+            pager TEXT,
             email TEXT,
+            directory_uri TEXT,
             ms_uri TEXT,
             department TEXT,
             title TEXT,
@@ -1798,6 +1812,13 @@ def init_database(db_file='thief.db'):
             UNIQUE(cucm_host, username)
         )
     ''')
+    # Migrate pre-existing uds_directory tables that lack the newer columns
+    # (CREATE TABLE IF NOT EXISTS won't add columns to an already-created table).
+    cursor.execute('PRAGMA table_info(uds_directory)')
+    _existing_cols = {row[1] for row in cursor.fetchall()}
+    for _col in ('nick_name', 'pager', 'directory_uri'):
+        if _col not in _existing_cols:
+            cursor.execute(f'ALTER TABLE uds_directory ADD COLUMN {_col} TEXT')
 
     # Create table for every spray attempt against the UDS user endpoint
     cursor.execute('''
@@ -2778,9 +2799,9 @@ def main():
                     conn = sqlite3.connect(db_file)
                     cur = conn.cursor()
                     if cucm_filter:
-                        cur.execute('SELECT username, first_name, middle_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
+                        cur.execute('SELECT username, first_name, middle_name, nick_name, last_name, display_name, phone_number, home_number, mobile_number, pager, email, directory_uri, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
                     else:
-                        cur.execute('SELECT username, first_name, middle_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
+                        cur.execute('SELECT username, first_name, middle_name, nick_name, last_name, display_name, phone_number, home_number, mobile_number, pager, email, directory_uri, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
                     dir_rows = cur.fetchall()
                     conn.close()
                     if dir_rows:
