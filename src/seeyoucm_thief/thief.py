@@ -2211,6 +2211,28 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        uds_directory = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT username, display_name, first_name, last_name,
+                           phone_number, email, department
+                      FROM uds_directory WHERE cucm_host = ?
+                     ORDER BY username
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT username, display_name, first_name, last_name,
+                           phone_number, email, department
+                      FROM uds_directory ORDER BY username
+                ''')
+            uds_directory = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                uds_directory = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
@@ -2238,7 +2260,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not verified_admins:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not uds_directory and not verified_admins:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -2358,6 +2380,15 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print("-"*70)
             for cucm_host_row, username, device_name, source, ts in uds_devices:
                 print(f'{username:<24} {device_name:<20} {source:<12} {cucm_host_row}')
+
+        if uds_directory:
+            print(f'\n\033[1m[+] UDS Directory ({len(uds_directory)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Username":<20} {"Name":<22} {"Phone":<10} {"Email":<26} {"Dept"}')
+            print("-"*70)
+            for username, display_name, first_name, last_name, phone_number, email, department in uds_directory:
+                name = display_name or ' '.join(p for p in (first_name, last_name) if p)
+                print(f'{username:<20} {name:<22} {phone_number:<10} {email:<26} {department}')
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
@@ -2682,6 +2713,24 @@ def main():
                 cred_rows = [(c[2], c[3], c[1]) for c in credentials]  # (username, password, device)
                 export_to_csv(cred_rows, [], csv_filename)
                 print(f'[+] Exported credentials (with passwords) to CSV: {csv_filename}')
+                # Companion directory CSV (separate from the credentials export)
+                try:
+                    conn = sqlite3.connect(db_file)
+                    cur = conn.cursor()
+                    if cucm_filter:
+                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
+                    else:
+                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
+                    dir_rows = cur.fetchall()
+                    conn.close()
+                    if dir_rows:
+                        dir_records = [dict(zip(_DIRECTORY_CSV_COLUMNS, row)) for row in dir_rows]
+                        dir_csv = _directory_csv_name(csv_filename)
+                        export_directory_to_csv(dir_records, dir_csv)
+                        print(f'[+] Exported UDS directory to CSV: {dir_csv}')
+                except sqlite3.OperationalError as e:
+                    if 'no such table' not in str(e):
+                        raise
             except Exception as e:
                 print(f'[-] Error exporting credentials to CSV: {e}')
         display_database_summary(db_file, cucm_filter)

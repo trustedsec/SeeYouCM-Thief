@@ -563,3 +563,23 @@ def test_export_directory_to_csv_writes_header_and_rows(tmp_path):
                         "manager,user_id")
     assert lines[1].startswith("alice,Alice,Smith,Alice Smith,1001,")
     assert "alice@corp.example" in lines[1]
+
+
+def test_show_db_displays_uds_directory(db_path, capsys):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    thief.record_uds_directory("cucm.example.com", recs, db_path)
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Directory" in out
+    assert "alice" in out
+    assert "alice@corp.example" in out
+
+
+def test_show_db_omits_uds_directory_when_empty(db_path, capsys):
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Directory" not in out
