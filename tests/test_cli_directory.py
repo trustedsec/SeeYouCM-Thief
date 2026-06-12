@@ -14,7 +14,7 @@ def _env():
 
 def test_directory_requires_host():
     result = subprocess.run(
-        ["python3", "thief.py", "--directory"],
+        ["python3", _THIEF, "--directory"],
         capture_output=True, text=True, env=_env(),
     )
     assert result.returncode == 1
@@ -25,7 +25,7 @@ def test_directory_writes_csv_and_table_without_csv_flag(tmp_path):
     out_csv = tmp_path / "dir.csv"
     db_path = tmp_path / "d.db"
     result = subprocess.run(
-        ["python3", "thief.py", "--directory", "-H", "mock-cucm",
+        ["python3", _THIEF, "--directory", "-H", "mock-cucm",
          "--directory-outfile", str(out_csv), "--db", str(db_path)],
         capture_output=True, text=True, env=_env(),
     )
@@ -51,7 +51,7 @@ def test_directory_writes_csv_and_table_without_csv_flag(tmp_path):
 def test_directory_no_db_still_writes_csv(tmp_path):
     out_csv = tmp_path / "dir.csv"
     result = subprocess.run(
-        ["python3", "thief.py", "--directory", "-H", "mock-cucm",
+        ["python3", _THIEF, "--directory", "-H", "mock-cucm",
          "--directory-outfile", str(out_csv), "--no-db"],
         capture_output=True, text=True, env=_env(),
     )
