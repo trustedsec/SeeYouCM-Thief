@@ -515,16 +515,17 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     return filenames
 
 
-def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
-    if _TEST_MODE:
-        return ['testuser1', 'testuser2']
-
+def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    """Yield each /cucm-uds/users page's response body text, following UDS
+    pagination. Shared by get_users_api and get_user_directory_api so the
+    page-walking logic lives in one place. Pagination 'item count' is measured by
+    <userName> occurrences (UDS paginates per user)."""
     base = f'https://{cucm_host}:{port}/cucm-uds/users'
-    users = []
     seen_urls = set()
     next_url = base
     pages = 0
     total = None
+    collected = 0
 
     while next_url and pages < max_pages:
         if next_url in seen_urls:
@@ -544,12 +545,14 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
             dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
             break
 
-        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
-        dbg(f'UDS page {pages} parsed {len(page_users)} userName entries')
-        if not page_users:
+        page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
+        dbg(f'UDS page {pages} parsed {page_count} userName entries')
+        if page_count == 0:
             dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
             break
-        users.extend(page_users)
+
+        yield resp.text
+        collected += page_count
 
         if total is None:
             total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text) \
@@ -558,17 +561,25 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
                 total = int(total_match.group(1))
                 dbg(f'UDS server reports totalCount={total}')
 
-        if total is not None and len(users) >= total:
+        if total is not None and collected >= total:
             break
 
-        next_url = _uds_next_link(resp.text, base, len(users) + 1)
+        next_url = _uds_next_link(resp.text, base, collected + 1)
         if not next_url:
             dbg('UDS no next-page link found; stopping pagination')
             break
 
-    dbg(f'UDS total users collected: {len(users)} across {pages} page(s)')
-    if total is not None and len(users) < total:
-        print(f'[!] UDS reports {total} total users but only {len(users)} were retrieved.')
+    dbg(f'UDS total users collected: {collected} across {pages} page(s)')
+    if total is not None and collected < total:
+        print(f'[!] UDS reports {total} total users but only {collected} were retrieved.')
+
+
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    if _TEST_MODE:
+        return ['testuser1', 'testuser2']
+    users = []
+    for body in _iter_uds_user_pages(cucm_host, port, timeout, max_pages):
+        users.extend(re.findall(r'<userName>([^<]+)</userName>', body))
     return users
 
 

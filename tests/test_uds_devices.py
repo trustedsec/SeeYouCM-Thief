@@ -407,3 +407,21 @@ def test_enumerate_devices_authenticated_ok_with_no_devices_counts_ok_only(db_pa
     )
     assert result["ok"] == 1
     assert result["devices"] == {}
+
+
+# ---------------------------------------------------------------------------
+# _iter_uds_user_pages (shared pagination)
+# ---------------------------------------------------------------------------
+
+def test_iter_uds_user_pages_yields_each_page_body():
+    page1 = '<users totalCount="3"><user><userName>a</userName></user><user><userName>b</userName></user></users>'
+    page2 = '<users totalCount="3"><user><userName>c</userName></user></users>'
+    responses = [MagicMock(status_code=200, text=page1),
+                 MagicMock(status_code=200, text=page2)]
+
+    def side_effect(url, **kwargs):
+        return responses.pop(0)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        bodies = list(thief._iter_uds_user_pages("cucm.example.com", 8443))
+    assert bodies == [page1, page2]
