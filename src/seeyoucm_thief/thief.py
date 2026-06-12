@@ -2998,7 +2998,7 @@ def main():
                     base_csv = csv_output if csv_output is not True else 'seeyoucm_results.csv'
                     dir_csv = _directory_csv_name(base_csv)
                 else:
-                    dir_csv = DEFAULT_DIRECTORY_OUTFILE
+                    dir_csv = args.directory_outfile
                 export_directory_to_csv(directory, dir_csv)
                 print(f'[+] Directory written to {dir_csv}')
             if not no_db:

@@ -1,6 +1,7 @@
 import csv
 import os
 import pathlib
+import sqlite3
 import subprocess
 
 _THIEF = str(pathlib.Path(__file__).resolve().parent.parent / "thief.py")
@@ -39,7 +40,6 @@ def test_directory_writes_csv_and_table_without_csv_flag(tmp_path):
         rows = list(csv.reader(fh))
     assert rows[0][0] == "username"          # header from _DIRECTORY_CSV_COLUMNS
     assert any("testuser1" in r for r in rows[1:])
-    import sqlite3
     conn = sqlite3.connect(str(db_path))
     try:
         count = conn.execute("SELECT COUNT(*) FROM uds_directory").fetchone()[0]
@@ -74,3 +74,20 @@ def test_userenum_writes_directory_without_csv_flag(tmp_path):
     expected = tmp_path / "cucm_directory.csv"
     assert expected.exists(), result.stdout
     assert "Directory written to" in result.stdout
+
+
+def test_userenum_honors_directory_outfile(tmp_path):
+    db_path = tmp_path / "u.db"
+    out_users = tmp_path / "users.txt"
+    custom = tmp_path / "custom_dir.csv"
+    result = subprocess.run(
+        ["python3", _THIEF,
+         "--userenum", "-H", "mock-cucm",
+         "--db", str(db_path), "--outfile", str(out_users),
+         "--directory-outfile", str(custom)],
+        capture_output=True, text=True, env=_env(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    # --userenum (no --csv) writes the directory to the --directory-outfile path.
+    assert custom.exists(), result.stdout
+    assert (tmp_path / "cucm_directory.csv").exists() is False
