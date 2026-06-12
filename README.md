@@ -101,20 +101,6 @@ The `phoneNumber` element is the directory number / extension, which in some
 dial plans is itself the full DID. True external DIDs require authenticated AXL
 access and are out of scope for this unauthenticated path.
 
-### Authenticated Device Discovery
-
-Authenticate to the UDS API with a single end-user credential, enumerate **all** users from `/cucm-uds/users`, then query each user's associated SEP devices with that one credential. The discovered SEPs are deduped, and every config is downloaded and parsed for credentials:
-
-```bash
-./thief.py -H <CUCM Server> --uds-devices --uds-user jdoe --uds-password 'Passw0rd!'
-```
-
-Authorization reality: a standard end user can usually only read their own record, so on a strict server most users return *denied* and you mainly recover the authenticated user's own devices; on permissive or privileged setups you get the full set. The run prints an ok/denied/error tally so you can see how the server responded.
-
-For each user the sweep queries **both** `/cucm-uds/user/{id}` and `/cucm-uds/user/{id}/devices` and unions the SEP names, so a host that misconfigures authorization on one endpoint but not the other still yields devices. This roughly doubles the request volume per user — tune with `-T/--threads`.
-
-`--uds-devices` requires `-H/--host`, `--uds-user`, and `--uds-password`. It needs **only end-user credentials** — no CCM Admin or AXL access is required. It honors `--uds-port` (default: 8443), `--no-db`, and `-T/--threads` for sweep concurrency.
-
 ### Password Spray
 
 Spray a single password across every UDS-enumerated user, with a default 1-hour-per-user rate limit:
@@ -213,10 +199,7 @@ Export to CSV:
 - `--directory-outfile FILENAME`: Override the default CSV output path for `--directory` and `--userenum` (default: `cucm_directory.csv`)
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
-- `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)
-- `--uds-devices`: Authenticate to the UDS API with one end-user credential, enumerate **all** users, query each user's associated SEP devices with that credential, then dedupe and download + parse every discovered config (requires `-H`, `--uds-user`, and `--uds-password`; needs only end-user credentials — no admin/AXL access; prints an ok/denied/error tally)
-- `--uds-user USERNAME`: End-user username for `--uds-devices` authentication
-- `--uds-password PASSWORD`: End-user password for `--uds-devices` authentication
+- `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum`, `--directory`, and `--servers` (default: 8443)
 - `--spray`: Password-spray the UDS API (requires `-H`; mutually exclusive with `--brute-mac`)
 - `--spray-password PASSWORD`: Single password to spray across all eligible users
 - `-P, --passwords FILE`: Password list file; sprays each password in turn, sleeping ~1h between rounds
