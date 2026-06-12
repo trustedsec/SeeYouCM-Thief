@@ -515,16 +515,17 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     return filenames
 
 
-def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
-    if _TEST_MODE:
-        return ['testuser1', 'testuser2']
-
+def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    """Yield each /cucm-uds/users page's response body text, following UDS
+    pagination. Shared by get_users_api and get_user_directory_api so the
+    page-walking logic lives in one place. Pagination 'item count' is measured by
+    <userName> occurrences (UDS paginates per user)."""
     base = f'https://{cucm_host}:{port}/cucm-uds/users'
-    users = []
     seen_urls = set()
     next_url = base
     pages = 0
     total = None
+    collected = 0
 
     while next_url and pages < max_pages:
         if next_url in seen_urls:
@@ -544,12 +545,14 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
             dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
             break
 
-        page_users = re.findall(r'<userName>([^<]+)</userName>', resp.text)
-        dbg(f'UDS page {pages} parsed {len(page_users)} userName entries')
-        if not page_users:
+        page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
+        dbg(f'UDS page {pages} parsed {page_count} userName entries')
+        if page_count == 0:
             dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
             break
-        users.extend(page_users)
+
+        yield resp.text
+        collected += page_count
 
         if total is None:
             total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text) \
@@ -558,18 +561,81 @@ def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
                 total = int(total_match.group(1))
                 dbg(f'UDS server reports totalCount={total}')
 
-        if total is not None and len(users) >= total:
+        if total is not None and collected >= total:
             break
 
-        next_url = _uds_next_link(resp.text, base, len(users) + 1)
+        next_url = _uds_next_link(resp.text, base, collected + 1)
         if not next_url:
             dbg('UDS no next-page link found; stopping pagination')
             break
 
-    dbg(f'UDS total users collected: {len(users)} across {pages} page(s)')
-    if total is not None and len(users) < total:
-        print(f'[!] UDS reports {total} total users but only {len(users)} were retrieved.')
+    dbg(f'UDS total users collected: {collected} across {pages} page(s)')
+    if total is not None and collected < total:
+        print(f'[!] UDS reports {total} total users but only {collected} were retrieved.')
+
+
+def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    if _TEST_MODE:
+        return ['testuser1', 'testuser2']
+    users = []
+    for body in _iter_uds_user_pages(cucm_host, port, timeout, max_pages):
+        users.extend(re.findall(r'<userName>([^<]+)</userName>', body))
     return users
+
+
+# Maps uds_directory dict keys -> the UDS <element> name inside a <user> block.
+_UDS_DIRECTORY_FIELDS = (
+    ('first_name', 'firstName'),
+    ('middle_name', 'middleName'),
+    ('last_name', 'lastName'),
+    ('display_name', 'displayName'),
+    ('phone_number', 'phoneNumber'),
+    ('home_number', 'homeNumber'),
+    ('mobile_number', 'mobileNumber'),
+    ('email', 'email'),
+    ('ms_uri', 'msUri'),
+    ('department', 'department'),
+    ('title', 'title'),
+    ('manager', 'manager'),
+    ('user_id', 'id'),
+)
+
+
+def parse_uds_directory(xml_body):
+    """Return a list of dicts, one per <user> block in a /cucm-uds/users page.
+
+    Keys: username, first_name, middle_name, last_name, display_name,
+    phone_number, home_number, mobile_number, email, ms_uri, department, title,
+    manager, user_id. Missing fields are '' (empty string). A <user> with no
+    <userName> is skipped."""
+    records = []
+    for block in re.findall(r'<user\b[^>]*>(.*?)</user>', xml_body, re.DOTALL):
+        name_match = re.search(r'<userName>([^<]+)</userName>', block)
+        if not name_match:
+            continue
+        record = {'username': name_match.group(1).strip()}
+        for key, tag in _UDS_DIRECTORY_FIELDS:
+            m = re.search(rf'<{tag}>([^<]*)</{tag}>', block)
+            record[key] = m.group(1).strip() if m else ''
+        records.append(record)
+    return records
+
+
+def get_user_directory_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
+    """Full corporate-directory records from /cucm-uds/users via the shared page
+    iterator. Returns a list of dicts (see parse_uds_directory)."""
+    if _TEST_MODE:
+        return [
+            {'username': 'testuser1', 'first_name': 'Test', 'middle_name': '',
+             'last_name': 'One', 'display_name': 'Test One', 'phone_number': '1001',
+             'home_number': '', 'mobile_number': '', 'email': 'testuser1@corp.test',
+             'ms_uri': '', 'department': 'IT', 'title': '', 'manager': '',
+             'user_id': 'uuid-testuser1'},
+        ]
+    records = []
+    for body in _iter_uds_user_pages(cucm_host, port, timeout, max_pages):
+        records.extend(parse_uds_directory(body))
+    return records
 
 
 def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
@@ -667,6 +733,61 @@ def record_uds_users(cucm_host, usernames, db_file='thief.db'):
     except Exception as e:
         if globals().get('debug', False):
             print(f'[!] record_uds_users error: {e}')
+        return 0
+
+
+def record_uds_directory(cucm_host, records, db_file='thief.db'):
+    """
+    Upsert harvested UDS directory records into the uds_directory table.
+
+    Each record is the dict shape produced by parse_uds_directory. On conflict
+    (same cucm_host + username), refreshes all field columns and last_seen but
+    preserves first_seen. Returns the number of rows inserted/updated.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        written = 0
+        for r in records:
+            cursor.execute('''
+                INSERT INTO uds_directory
+                    (cucm_host, username, first_name, middle_name, last_name,
+                     display_name, phone_number, home_number, mobile_number,
+                     email, ms_uri, department, title, manager, user_id,
+                     first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cucm_host, username) DO UPDATE SET
+                    first_name=excluded.first_name,
+                    middle_name=excluded.middle_name,
+                    last_name=excluded.last_name,
+                    display_name=excluded.display_name,
+                    phone_number=excluded.phone_number,
+                    home_number=excluded.home_number,
+                    mobile_number=excluded.mobile_number,
+                    email=excluded.email,
+                    ms_uri=excluded.ms_uri,
+                    department=excluded.department,
+                    title=excluded.title,
+                    manager=excluded.manager,
+                    user_id=excluded.user_id,
+                    last_seen=excluded.last_seen
+            ''', (
+                cucm_host, r.get('username', ''), r.get('first_name', ''),
+                r.get('middle_name', ''), r.get('last_name', ''),
+                r.get('display_name', ''), r.get('phone_number', ''),
+                r.get('home_number', ''), r.get('mobile_number', ''),
+                r.get('email', ''), r.get('ms_uri', ''), r.get('department', ''),
+                r.get('title', ''), r.get('manager', ''), r.get('user_id', ''),
+                timestamp, timestamp,
+            ))
+            written += 1
+        conn.commit()
+        conn.close()
+        return written
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] record_uds_directory error: {e}')
         return 0
 
 
@@ -1457,10 +1578,34 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
                 print('Username and password not set in {0}'.format(filename))
     return credentials, usernames
 
+_DIRECTORY_CSV_COLUMNS = (
+    'username', 'first_name', 'last_name', 'display_name', 'phone_number',
+    'home_number', 'mobile_number', 'email', 'ms_uri', 'department', 'title',
+    'manager', 'user_id',
+)
+
+
+def _directory_csv_name(base_filename):
+    """Derive the companion directory-CSV filename: insert '-directory' before
+    the extension (or append it when there is none)."""
+    root, ext = os.path.splitext(base_filename)
+    return f'{root}-directory{ext}'
+
+
+def export_directory_to_csv(records, filename):
+    """Write harvested UDS directory records to a CSV with a fixed column order
+    (see _DIRECTORY_CSV_COLUMNS). One row per record."""
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(_DIRECTORY_CSV_COLUMNS)
+        for r in records:
+            writer.writerow([r.get(col, '') for col in _DIRECTORY_CSV_COLUMNS])
+
+
 def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
     """
     Export discovered credentials and usernames to CSV file
-    
+
     Args:
         credentials: List of tuples (username, password, device)
         usernames: List of tuples (username, device)
@@ -1607,6 +1752,31 @@ def init_database(db_file='thief.db'):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cucm_host TEXT NOT NULL,
             username TEXT NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(cucm_host, username)
+        )
+    ''')
+
+    # Create table for the full UDS corporate-directory harvest (--userenum)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uds_directory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            username TEXT NOT NULL,
+            first_name TEXT,
+            middle_name TEXT,
+            last_name TEXT,
+            display_name TEXT,
+            phone_number TEXT,
+            home_number TEXT,
+            mobile_number TEXT,
+            email TEXT,
+            ms_uri TEXT,
+            department TEXT,
+            title TEXT,
+            manager TEXT,
+            user_id TEXT,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             UNIQUE(cucm_host, username)
@@ -2081,6 +2251,28 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        uds_directory = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT username, display_name, first_name, last_name,
+                           phone_number, email, department
+                      FROM uds_directory WHERE cucm_host = ?
+                     ORDER BY username
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT username, display_name, first_name, last_name,
+                           phone_number, email, department
+                      FROM uds_directory ORDER BY username
+                ''')
+            uds_directory = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                uds_directory = []
+            else:
+                raise
+
         # Get download stats (handle missing table gracefully)
         total_attempts = 0
         successful_downloads = 0
@@ -2108,7 +2300,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not verified_admins:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not uds_directory and not verified_admins:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -2228,6 +2420,15 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print("-"*70)
             for cucm_host_row, username, device_name, source, ts in uds_devices:
                 print(f'{username:<24} {device_name:<20} {source:<12} {cucm_host_row}')
+
+        if uds_directory:
+            print(f'\n\033[1m[+] UDS Directory ({len(uds_directory)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Username":<20} {"Name":<22} {"Phone":<10} {"Email":<26} {"Dept"}')
+            print("-"*70)
+            for username, display_name, first_name, last_name, phone_number, email, department in uds_directory:
+                name = display_name or ' '.join(p for p in (first_name, last_name) if p)
+                print(f'{username:<20} {name:<22} {phone_number:<10} {email:<26} {department}')
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
@@ -2552,6 +2753,24 @@ def main():
                 cred_rows = [(c[2], c[3], c[1]) for c in credentials]  # (username, password, device)
                 export_to_csv(cred_rows, [], csv_filename)
                 print(f'[+] Exported credentials (with passwords) to CSV: {csv_filename}')
+                # Companion directory CSV (separate from the credentials export)
+                try:
+                    conn = sqlite3.connect(db_file)
+                    cur = conn.cursor()
+                    if cucm_filter:
+                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
+                    else:
+                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
+                    dir_rows = cur.fetchall()
+                    conn.close()
+                    if dir_rows:
+                        dir_records = [dict(zip(_DIRECTORY_CSV_COLUMNS, row)) for row in dir_rows]
+                        dir_csv = _directory_csv_name(csv_filename)
+                        export_directory_to_csv(dir_records, dir_csv)
+                        print(f'[+] Exported UDS directory to CSV: {dir_csv}')
+                except sqlite3.OperationalError as e:
+                    if 'no such table' not in str(e):
+                        raise
             except Exception as e:
                 print(f'[-] Error exporting credentials to CSV: {e}')
         display_database_summary(db_file, cucm_filter)
@@ -2732,6 +2951,16 @@ def main():
             if debug:
                 for username in unique_users:
                     print(f'{username}')
+            directory = get_user_directory_api(CUCM_host, port=args.uds_port)
+            if directory:
+                if not no_db:
+                    written = record_uds_directory(CUCM_host, directory, db_file)
+                    print(f'[+] Harvested directory records for {written} user(s)')
+                if csv_output:
+                    base_csv = csv_output if csv_output is not True else 'seeyoucm_results.csv'
+                    dir_csv = _directory_csv_name(base_csv)
+                    export_directory_to_csv(directory, dir_csv)
+                    print(f'[+] Directory exported to CSV: {dir_csv}')
             if not no_db:
                 print(f'[*] Probing UDS for associated devices (unauthenticated)...')
                 found = enumerate_devices_unauthenticated(

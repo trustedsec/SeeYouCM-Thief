@@ -77,6 +77,8 @@ Extract usernames via CUCM UDS API:
 ./thief.py -H <CUCM Server> --userenum
 ```
 
+`--userenum` also harvests the full corporate directory from `/cucm-uds/users` — names, phone numbers, email, department, title, manager, and the per-user UUID — and stores it in the database (`uds_directory` table). This is the same anonymously-readable data phones use for the Directory button, so it works without credentials. View it later with `--show-db`, and when `--csv FILE` is supplied the directory is written to a companion `FILE-directory.csv` alongside the usernames `outfile`.
+
 ### Authenticated Device Discovery
 
 Authenticate to the UDS API with a single end-user credential, enumerate **all** users from `/cucm-uds/users`, then query each user's associated SEP devices with that one credential. The discovered SEPs are deduped, and every config is downloaded and parsed for credentials:
@@ -184,7 +186,7 @@ Export to CSV:
 ### Attack Options
 - `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`)
 - `--force`: Bypass cache and force re-download of all configuration files
-- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory)
+- `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names, phone numbers, email, department, title, manager, UUID) into the `uds_directory` table; with `--csv FILE` also writes a companion `FILE-directory.csv`
 - `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
 - `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum` (default: 8443)

@@ -537,3 +537,179 @@ def test_enumerate_devices_authenticated_ok_with_no_devices_counts_ok_only(db_pa
     )
     assert result["ok"] == 1
     assert result["devices"] == {}
+
+
+# ---------------------------------------------------------------------------
+# _iter_uds_user_pages (shared pagination)
+# ---------------------------------------------------------------------------
+
+def test_iter_uds_user_pages_yields_each_page_body():
+    page1 = '<users totalCount="3"><user><userName>a</userName></user><user><userName>b</userName></user></users>'
+    page2 = '<users totalCount="3"><user><userName>c</userName></user></users>'
+    responses = [MagicMock(status_code=200, text=page1),
+                 MagicMock(status_code=200, text=page2)]
+
+    def side_effect(url, **kwargs):
+        return responses.pop(0)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        bodies = list(thief._iter_uds_user_pages("cucm.example.com", 8443))
+    assert bodies == [page1, page2]
+
+
+# ---------------------------------------------------------------------------
+# parse_uds_directory
+# ---------------------------------------------------------------------------
+
+UDS_DIRECTORY_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<users totalCount="2">
+  <user>
+    <id>uuid-alice</id>
+    <userName>alice</userName>
+    <firstName>Alice</firstName>
+    <lastName>Smith</lastName>
+    <displayName>Alice Smith</displayName>
+    <phoneNumber>1001</phoneNumber>
+    <email>alice@corp.example</email>
+    <department>Finance</department>
+    <title>Analyst</title>
+    <manager>bob</manager>
+  </user>
+  <user>
+    <id>uuid-bob</id>
+    <userName>bob</userName>
+    <firstName>Bob</firstName>
+  </user>
+</users>"""
+
+
+def test_parse_uds_directory_extracts_all_fields():
+    records = thief.parse_uds_directory(UDS_DIRECTORY_XML)
+    assert records[0] == {
+        "username": "alice", "first_name": "Alice", "middle_name": "",
+        "last_name": "Smith", "display_name": "Alice Smith",
+        "phone_number": "1001", "home_number": "", "mobile_number": "",
+        "email": "alice@corp.example", "ms_uri": "", "department": "Finance",
+        "title": "Analyst", "manager": "bob", "user_id": "uuid-alice",
+    }
+
+
+def test_parse_uds_directory_missing_fields_are_empty():
+    records = thief.parse_uds_directory(UDS_DIRECTORY_XML)
+    assert records[1]["username"] == "bob"
+    assert records[1]["first_name"] == "Bob"
+    assert records[1]["last_name"] == ""
+    assert records[1]["email"] == ""
+
+
+def test_parse_uds_directory_skips_user_without_username():
+    xml = "<users><user><firstName>NoName</firstName></user></users>"
+    assert thief.parse_uds_directory(xml) == []
+
+
+def test_parse_uds_directory_empty_body():
+    assert thief.parse_uds_directory("") == []
+
+
+def test_get_user_directory_api_assembles_records_across_pages():
+    page1 = ('<users totalCount="2"><user><userName>alice</userName>'
+             '<email>alice@corp.example</email></user></users>')
+    page2 = ('<users totalCount="2"><user><userName>bob</userName>'
+             '<department>IT</department></user></users>')
+    responses = [MagicMock(status_code=200, text=page1),
+                 MagicMock(status_code=200, text=page2)]
+
+    def side_effect(url, **kwargs):
+        return responses.pop(0)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        records = thief.get_user_directory_api("cucm.example.com", port=8443)
+    assert [r["username"] for r in records] == ["alice", "bob"]
+    assert records[0]["email"] == "alice@corp.example"
+    assert records[1]["department"] == "IT"
+
+
+# ---------------------------------------------------------------------------
+# uds_directory table + record_uds_directory
+# ---------------------------------------------------------------------------
+
+def test_init_database_creates_uds_directory_table(db_path):
+    import sqlite3 as _sq
+    conn = _sq.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(uds_directory)").fetchall()}
+    conn.close()
+    assert {"cucm_host", "username", "first_name", "last_name", "display_name",
+            "phone_number", "email", "department", "title", "manager", "user_id",
+            "first_seen", "last_seen"} <= cols
+
+
+def test_record_uds_directory_inserts_rows(db_path):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    thief.record_uds_directory("cucm.example.com", recs, db_path)
+    rows = _rows(db_path, "SELECT username, email, department FROM uds_directory")
+    assert rows == [("alice", "alice@corp.example", "Finance")]
+
+
+def test_record_uds_directory_upserts_without_duplicates(db_path):
+    rec = {'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+           'last_name': 'Smith', 'display_name': '', 'phone_number': '1001',
+           'home_number': '', 'mobile_number': '', 'email': 'old@corp.example',
+           'ms_uri': '', 'department': '', 'title': '', 'manager': '',
+           'user_id': 'uuid-alice'}
+    thief.record_uds_directory("cucm.example.com", [rec], db_path)
+    rec2 = dict(rec, email="new@corp.example")
+    thief.record_uds_directory("cucm.example.com", [rec2], db_path)
+    rows = _rows(db_path, "SELECT COUNT(*), MAX(email) FROM uds_directory WHERE username='alice'")
+    assert rows[0][0] == 1
+    assert rows[0][1] == "new@corp.example"
+
+
+# ---------------------------------------------------------------------------
+# directory CSV export
+# ---------------------------------------------------------------------------
+
+def test_directory_csv_name_derives_companion_name():
+    assert thief._directory_csv_name("results.csv") == "results-directory.csv"
+    assert thief._directory_csv_name("results") == "results-directory"
+    assert thief._directory_csv_name("/tmp/out.csv") == "/tmp/out-directory.csv"
+
+
+def test_export_directory_to_csv_writes_header_and_rows(tmp_path):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    out = tmp_path / "dir.csv"
+    thief.export_directory_to_csv(recs, str(out))
+    text = out.read_text()
+    lines = text.strip().splitlines()
+    assert lines[0] == ("username,first_name,last_name,display_name,phone_number,"
+                        "home_number,mobile_number,email,ms_uri,department,title,"
+                        "manager,user_id")
+    assert lines[1].startswith("alice,Alice,Smith,Alice Smith,1001,")
+    assert "alice@corp.example" in lines[1]
+
+
+def test_show_db_displays_uds_directory(db_path, capsys):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    thief.record_uds_directory("cucm.example.com", recs, db_path)
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Directory" in out
+    assert "alice" in out
+    assert "alice@corp.example" in out
+
+
+def test_show_db_omits_uds_directory_when_empty(db_path, capsys):
+    thief.display_database_summary(db_path)
+    out = capsys.readouterr().out
+    assert "UDS Directory" not in out
