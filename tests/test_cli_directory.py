@@ -1,6 +1,9 @@
 import csv
 import os
+import pathlib
 import subprocess
+
+_THIEF = str(pathlib.Path(__file__).resolve().parent.parent / "thief.py")
 
 
 def _env():
@@ -55,3 +58,19 @@ def test_directory_no_db_still_writes_csv(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert out_csv.exists()
     assert "testuser1" in result.stdout
+
+
+def test_userenum_writes_directory_without_csv_flag(tmp_path):
+    db_path = tmp_path / "u.db"
+    out_users = tmp_path / "users.txt"
+    result = subprocess.run(
+        ["python3", _THIEF,
+         "--userenum", "-H", "mock-cucm",
+         "--db", str(db_path), "--outfile", str(out_users)],
+        capture_output=True, text=True, env=_env(), cwd=str(tmp_path),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    # The default directory CSV is created even though --csv was not passed.
+    expected = tmp_path / "cucm_directory.csv"
+    assert expected.exists(), result.stdout
+    assert "Directory written to" in result.stdout

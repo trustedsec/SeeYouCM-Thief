@@ -2997,8 +2997,10 @@ def main():
                 if csv_output:
                     base_csv = csv_output if csv_output is not True else 'seeyoucm_results.csv'
                     dir_csv = _directory_csv_name(base_csv)
-                    export_directory_to_csv(directory, dir_csv)
-                    print(f'[+] Directory exported to CSV: {dir_csv}')
+                else:
+                    dir_csv = DEFAULT_DIRECTORY_OUTFILE
+                export_directory_to_csv(directory, dir_csv)
+                print(f'[+] Directory written to {dir_csv}')
             if not no_db:
                 print(f'[*] Probing UDS for associated devices (unauthenticated)...')
                 found = enumerate_devices_unauthenticated(
