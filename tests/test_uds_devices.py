@@ -688,10 +688,10 @@ def test_export_directory_to_csv_writes_header_and_rows(tmp_path):
     thief.export_directory_to_csv(recs, str(out))
     text = out.read_text()
     lines = text.strip().splitlines()
-    assert lines[0] == ("username,first_name,last_name,display_name,phone_number,"
-                        "home_number,mobile_number,email,ms_uri,department,title,"
-                        "manager,user_id")
-    assert lines[1].startswith("alice,Alice,Smith,Alice Smith,1001,")
+    assert lines[0] == ("username,first_name,middle_name,last_name,display_name,"
+                        "phone_number,home_number,mobile_number,email,ms_uri,"
+                        "department,title,manager,user_id")
+    assert lines[1].startswith("alice,Alice,,Smith,Alice Smith,1001,")
     assert "alice@corp.example" in lines[1]
 
 

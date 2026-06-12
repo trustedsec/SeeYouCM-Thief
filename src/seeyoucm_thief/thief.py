@@ -1581,9 +1581,9 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
     return credentials, usernames
 
 _DIRECTORY_CSV_COLUMNS = (
-    'username', 'first_name', 'last_name', 'display_name', 'phone_number',
-    'home_number', 'mobile_number', 'email', 'ms_uri', 'department', 'title',
-    'manager', 'user_id',
+    'username', 'first_name', 'middle_name', 'last_name', 'display_name',
+    'phone_number', 'home_number', 'mobile_number', 'email', 'ms_uri',
+    'department', 'title', 'manager', 'user_id',
 )
 
 
@@ -2778,9 +2778,9 @@ def main():
                     conn = sqlite3.connect(db_file)
                     cur = conn.cursor()
                     if cucm_filter:
-                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
+                        cur.execute('SELECT username, first_name, middle_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory WHERE cucm_host = ? ORDER BY username', (cucm_filter,))
                     else:
-                        cur.execute('SELECT username, first_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
+                        cur.execute('SELECT username, first_name, middle_name, last_name, display_name, phone_number, home_number, mobile_number, email, ms_uri, department, title, manager, user_id FROM uds_directory ORDER BY username')
                     dir_rows = cur.fetchall()
                     conn.close()
                     if dir_rows:

@@ -39,6 +39,7 @@ def test_directory_writes_csv_and_table_without_csv_flag(tmp_path):
     with out_csv.open(newline="") as fh:
         rows = list(csv.reader(fh))
     assert rows[0][0] == "username"          # header from _DIRECTORY_CSV_COLUMNS
+    assert "middle_name" in rows[0]          # full field set, not a subset
     assert any("testuser1" in r for r in rows[1:])
     conn = sqlite3.connect(str(db_path))
     try:
