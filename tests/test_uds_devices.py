@@ -65,6 +65,40 @@ def test_parse_uds_devices_ignores_non_sep_device_names():
 
 
 # ---------------------------------------------------------------------------
+# parse_uds_device_collection (/cucm-uds/user/{id}/devices shape)
+# ---------------------------------------------------------------------------
+
+UDS_DEVICE_COLLECTION_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<devices>
+  <device uri="https://cucm/cucm-uds/user/abc/device/1">
+    <id>1</id>
+    <name>SEP001122334455</name>
+    <model>Cisco 8845</model>
+    <description>alice desk</description>
+  </device>
+  <device uri="https://cucm/cucm-uds/user/abc/device/2">
+    <id>2</id>
+    <name>SEP667788990011</name>
+    <model>Cisco 7841</model>
+  </device>
+</devices>"""
+
+
+def test_parse_uds_device_collection_returns_sep_names():
+    assert thief.parse_uds_device_collection(UDS_DEVICE_COLLECTION_XML) == [
+        "SEP001122334455", "SEP667788990011"]
+
+
+def test_parse_uds_device_collection_empty_on_user_object_shape():
+    # The /user/{id} associatedDevices shape has no <name>SEP…</name> tags
+    assert thief.parse_uds_device_collection(UDS_USER_XML) == []
+
+
+def test_parse_uds_device_collection_empty_on_blank():
+    assert thief.parse_uds_device_collection("") == []
+
+
+# ---------------------------------------------------------------------------
 # uds_devices DB table
 # ---------------------------------------------------------------------------
 
@@ -126,8 +160,11 @@ def test_get_user_devices_authenticated_returns_ok_and_devices_on_200():
     assert status == "ok"
     assert devices == ["SEP001122334455", "SEP667788990011"]
     # Must send Basic auth as the end user
-    assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
-    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
+    for c in mock_get.call_args_list:
+        assert c.kwargs.get('auth') == ("alice", "Summer2025!")
+    called = [c.args[0] for c in mock_get.call_args_list]
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice" in called
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice/devices" in called
 
 
 def test_get_user_devices_authenticated_queries_target_user_with_caller_auth():
@@ -137,9 +174,11 @@ def test_get_user_devices_authenticated_queries_target_user_with_caller_auth():
             "cucm.example.com", "alice", "Summer2025!", port=8443, target_user="bob")
     assert status == "ok"
     assert devices == ["SEP001122334455", "SEP667788990011"]
-    # Path targets bob, but auth identity stays alice
-    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/bob"
-    assert mock_get.call_args.kwargs.get('auth') == ("alice", "Summer2025!")
+    called = [c.args[0] for c in mock_get.call_args_list]
+    assert "https://cucm.example.com:8443/cucm-uds/user/bob" in called
+    assert "https://cucm.example.com:8443/cucm-uds/user/bob/devices" in called
+    for c in mock_get.call_args_list:
+        assert c.kwargs.get('auth') == ("alice", "Summer2025!")
 
 
 def test_get_user_devices_authenticated_defaults_target_to_auth_user():
@@ -147,7 +186,9 @@ def test_get_user_devices_authenticated_defaults_target_to_auth_user():
     with patch.object(thief.requests, 'get', return_value=fake_resp) as mock_get:
         thief.get_user_devices_authenticated(
             "cucm.example.com", "alice", "pw", port=8443)
-    assert mock_get.call_args.args[0] == "https://cucm.example.com:8443/cucm-uds/user/alice"
+    called = [c.args[0] for c in mock_get.call_args_list]
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice" in called
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice/devices" in called
 
 
 def test_get_user_devices_authenticated_returns_unauthorized_on_401():
@@ -184,6 +225,95 @@ def test_get_user_devices_authenticated_returns_error_on_unexpected_status():
             "cucm.example.com", "alice", "pw", port=8443)
     assert status == "error"
     assert devices == []
+
+
+def test_get_user_devices_authenticated_unions_both_endpoints():
+    # base returns one unique SEP; /devices returns a different one.
+    base_resp = MagicMock(
+        status_code=200,
+        text="<user><associatedDevices>"
+             "<device>SEP001122334455</device>"
+             "</associatedDevices></user>",
+    )
+    devices_resp = MagicMock(
+        status_code=200,
+        text="<devices><device><name>SEPAABBCCDDEEFF</name></device></devices>",
+    )
+
+    def side_effect(url, **kwargs):
+        return devices_resp if url.endswith('/devices') else base_resp
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect) as mock_get:
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "ok"
+    # base-endpoint SEP first, then /devices SEP, no duplicates
+    assert devices == ["SEP001122334455", "SEPAABBCCDDEEFF"]
+    called = [c.args[0] for c in mock_get.call_args_list]
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice" in called
+    assert "https://cucm.example.com:8443/cucm-uds/user/alice/devices" in called
+
+
+def test_get_user_devices_authenticated_ok_when_only_devices_endpoint_authorized():
+    base_resp = MagicMock(status_code=401, text="")
+    devices_resp = MagicMock(status_code=200, text=UDS_DEVICE_COLLECTION_XML)
+
+    def side_effect(url, **kwargs):
+        return devices_resp if url.endswith('/devices') else base_resp
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+
+
+def test_get_user_devices_authenticated_ok_when_only_base_endpoint_authorized():
+    base_resp = MagicMock(status_code=200, text=UDS_USER_XML)
+    devices_resp = MagicMock(status_code=401, text="")
+
+    def side_effect(url, **kwargs):
+        return devices_resp if url.endswith('/devices') else base_resp
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "ok"
+    assert devices == ["SEP001122334455", "SEP667788990011"]
+
+
+def test_get_user_devices_authenticated_unauthorized_only_when_neither_ok():
+    resp401 = MagicMock(status_code=401, text="")
+    with patch.object(thief.requests, 'get', return_value=resp401):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "unauthorized"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_error_when_both_fail():
+    with patch.object(thief.requests, 'get',
+                      side_effect=requests.exceptions.ConnectTimeout("boom")):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "error"
+    assert devices == []
+
+
+def test_get_user_devices_authenticated_dedups_same_sep_from_both():
+    base_resp = MagicMock(status_code=200,
+                          text="<user><associatedDevices><device>SEP001122334455</device></associatedDevices></user>")
+    devices_resp = MagicMock(status_code=200,
+                             text="<devices><device><name>SEP001122334455</name></device></devices>")
+
+    def side_effect(url, **kwargs):
+        return devices_resp if url.endswith('/devices') else base_resp
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        status, devices = thief.get_user_devices_authenticated(
+            "cucm.example.com", "alice", "pw", port=8443)
+    assert status == "ok"
+    assert devices == ["SEP001122334455"]
 
 
 # ---------------------------------------------------------------------------

