@@ -1538,10 +1538,34 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
                 print('Username and password not set in {0}'.format(filename))
     return credentials, usernames
 
+_DIRECTORY_CSV_COLUMNS = (
+    'username', 'first_name', 'last_name', 'display_name', 'phone_number',
+    'home_number', 'mobile_number', 'email', 'ms_uri', 'department', 'title',
+    'manager', 'user_id',
+)
+
+
+def _directory_csv_name(base_filename):
+    """Derive the companion directory-CSV filename: insert '-directory' before
+    the extension (or append it when there is none)."""
+    root, ext = os.path.splitext(base_filename)
+    return f'{root}-directory{ext}'
+
+
+def export_directory_to_csv(records, filename):
+    """Write harvested UDS directory records to a CSV with a fixed column order
+    (see _DIRECTORY_CSV_COLUMNS). One row per record."""
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(_DIRECTORY_CSV_COLUMNS)
+        for r in records:
+            writer.writerow([r.get(col, '') for col in _DIRECTORY_CSV_COLUMNS])
+
+
 def export_to_csv(credentials, usernames, filename='seeyoucm_results.csv'):
     """
     Export discovered credentials and usernames to CSV file
-    
+
     Args:
         credentials: List of tuples (username, password, device)
         usernames: List of tuples (username, device)

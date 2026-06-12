@@ -536,3 +536,30 @@ def test_record_uds_directory_upserts_without_duplicates(db_path):
     rows = _rows(db_path, "SELECT COUNT(*), MAX(email) FROM uds_directory WHERE username='alice'")
     assert rows[0][0] == 1
     assert rows[0][1] == "new@corp.example"
+
+
+# ---------------------------------------------------------------------------
+# directory CSV export
+# ---------------------------------------------------------------------------
+
+def test_directory_csv_name_derives_companion_name():
+    assert thief._directory_csv_name("results.csv") == "results-directory.csv"
+    assert thief._directory_csv_name("results") == "results-directory"
+    assert thief._directory_csv_name("/tmp/out.csv") == "/tmp/out-directory.csv"
+
+
+def test_export_directory_to_csv_writes_header_and_rows(tmp_path):
+    recs = [{'username': 'alice', 'first_name': 'Alice', 'middle_name': '',
+             'last_name': 'Smith', 'display_name': 'Alice Smith',
+             'phone_number': '1001', 'home_number': '', 'mobile_number': '',
+             'email': 'alice@corp.example', 'ms_uri': '', 'department': 'Finance',
+             'title': 'Analyst', 'manager': 'bob', 'user_id': 'uuid-alice'}]
+    out = tmp_path / "dir.csv"
+    thief.export_directory_to_csv(recs, str(out))
+    text = out.read_text()
+    lines = text.strip().splitlines()
+    assert lines[0] == ("username,first_name,last_name,display_name,phone_number,"
+                        "home_number,mobile_number,email,ms_uri,department,title,"
+                        "manager,user_id")
+    assert lines[1].startswith("alice,Alice,Smith,Alice Smith,1001,")
+    assert "alice@corp.example" in lines[1]
