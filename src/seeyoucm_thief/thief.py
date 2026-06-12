@@ -2862,6 +2862,16 @@ def main():
             if debug:
                 for username in unique_users:
                     print(f'{username}')
+            directory = get_user_directory_api(CUCM_host, port=args.uds_port)
+            if directory:
+                if not no_db:
+                    written = record_uds_directory(CUCM_host, directory, db_file)
+                    print(f'[+] Harvested directory records for {written} user(s)')
+                if csv_output:
+                    base_csv = csv_output if csv_output is not True else 'seeyoucm_results.csv'
+                    dir_csv = _directory_csv_name(base_csv)
+                    export_directory_to_csv(directory, dir_csv)
+                    print(f'[+] Directory exported to CSV: {dir_csv}')
             if not no_db:
                 print(f'[*] Probing UDS for associated devices (unauthenticated)...')
                 found = enumerate_devices_unauthenticated(
