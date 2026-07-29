@@ -13,10 +13,17 @@ def _disable_test_mode(monkeypatch):
 
 
 def _version_xml(auth=None):
-    body = "<version><version>14.0.1</version><prefix>14.0(1)</prefix>"
+    """Shaped per the official v14 version.get.xsd: a <versionInformation>
+    wrapper whose version= attribute is the UDS schema version, a <version>
+    element holding the CUCM version, and the capability flags nested under
+    <capabilities>."""
+    caps = ''
     if auth is not None:
-        body += f"<usersResourceAuthEnabled>{'true' if auth else 'false'}</usersResourceAuthEnabled>"
-    return body + "</version>"
+        caps = ('<capabilities>'
+                f"<usersResourceAuthEnabled>{'true' if auth else 'false'}</usersResourceAuthEnabled>"
+                '</capabilities>')
+    return ('<versionInformation uri="https://cucm/cucm-uds/version" version="10.0.0">'
+            f'<version>14.0.1</version>{caps}</versionInformation>')
 
 
 def _resp(text, status=200):

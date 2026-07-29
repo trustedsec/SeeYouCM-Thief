@@ -528,7 +528,7 @@ def test_cli_invokes_run_spray_with_correct_args(monkeypatch, tmp_path):
         called.update(kwargs)
 
     monkeypatch.setattr(thief, 'run_spray', fake_run_spray)
-    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0', 'prefix': None})
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0'})
     db = tmp_path / "thief.db"
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray',
@@ -557,7 +557,7 @@ def test_cli_password_file_is_loaded(monkeypatch, tmp_path):
         called.update(kwargs)
 
     monkeypatch.setattr(thief, 'run_spray', fake_run_spray)
-    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0', 'prefix': None})
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: {'version': '15.0'})
     db = tmp_path / "thief.db"
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray', '-P', str(pw_file),

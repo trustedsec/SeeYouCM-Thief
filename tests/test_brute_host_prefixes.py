@@ -88,7 +88,7 @@ def test_servers_feature_still_probes_uds_version(monkeypatch, tmp_path):
     """UDS features must keep running the version probe."""
     calls = []
     monkeypatch.setattr(thief, 'get_version',
-                        lambda *a, **kw: calls.append(kw) or {'version': '14.0', 'prefix': None})
+                        lambda *a, **kw: calls.append(kw) or {'version': '14.0'})
     monkeypatch.setattr(thief, 'get_servers_api', lambda *a, **kw: [])
     db_file = str(tmp_path / 'thief.db')
     thief.init_database(db_file)
