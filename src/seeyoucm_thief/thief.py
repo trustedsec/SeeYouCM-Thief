@@ -979,6 +979,37 @@ def get_mac_prefixes_from_db(db_file='thief.db'):
     return rows
 
 
+def get_uds_device_macs_from_db(cucm_host, db_file='thief.db'):
+    """
+    Return MACs of SEP devices discovered on cucm_host via UDS as a list of
+    (full_mac, cucm_host) tuples, newest first. Lets --brute-mac run with only
+    -H by reusing devices found by --userenum/--spray against that server.
+    """
+    rows = []
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                SELECT DISTINCT device_name
+                FROM uds_devices
+                WHERE cucm_host = ?
+                ORDER BY discovery_time DESC
+            ''', (cucm_host,))
+            for (device_name,) in cursor.fetchall():
+                match = re.match(r'SEP([0-9A-Fa-f]{12})$', device_name or '')
+                if match:
+                    rows.append((match.group(1).upper(), cucm_host))
+        except sqlite3.OperationalError as e:
+            if 'no such table' not in str(e):
+                raise
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_uds_device_macs_from_db error: {e}')
+    return rows
+
+
 def parse_uds_devices(xml_body):
     """Extract SEP device names from a /cucm-uds/user/{id} XML response body."""
     return re.findall(r'<device>(SEP[0-9A-Fa-f]{12})</device>', xml_body)
@@ -2968,11 +2999,22 @@ def main():
             print(f'MAC brute force mode enabled for {len(phones)} phone(s) with suffix length {brute_mac_len}\n')
         else:
             # No phones supplied: reuse MAC prefixes discovered on a previous scan.
-            db_prefixes = [] if no_db else get_mac_prefixes_from_db(db_file)
+            all_prefixes = [] if no_db else get_mac_prefixes_from_db(db_file)
             if CUCM_host:
-                db_prefixes = [(fm, c) for fm, c in db_prefixes if c == CUCM_host]
+                db_prefixes = [(fm, c) for fm, c in all_prefixes if c == CUCM_host]
+                if not no_db:
+                    # SEP devices harvested from this server via --userenum/--spray
+                    db_prefixes += get_uds_device_macs_from_db(CUCM_host, db_file)
+                if not db_prefixes and all_prefixes:
+                    # Nothing recorded for this server yet: retarget prefixes
+                    # learned from phones on other servers at -H.
+                    db_prefixes = [(fm, CUCM_host) for fm, _ in all_prefixes]
+                    print(f'[*] No MAC prefixes recorded for {CUCM_host}; reusing '
+                          f'{len(db_prefixes)} prefix(es) discovered elsewhere\n')
+            else:
+                db_prefixes = all_prefixes
             if not db_prefixes:
-                print('You must specify at least one phone with -p when using --brute-mac')
+                print('You must specify at least one phone with -p (or a CUCM server with -H) when using --brute-mac')
                 if not no_db:
                     print('  (and no previously discovered phones were found in the database)')
                 quit(1)

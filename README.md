@@ -192,7 +192,7 @@ Export to CSV:
 - `-e, --enumsubnet`: Enumerate and attack subnet in CIDR notation
 
 ### Attack Options
-- `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`)
+- `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`). With `-H` and no `-p`, prefixes come from that server's `mac_prefixes` rows plus any `SEP…` devices harvested from it by `--userenum`/`--spray`; if the server has none recorded, prefixes discovered elsewhere are retargeted at it
 - `--force`: Bypass cache and force re-download of all configuration files
 - `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names incl. nickname, phone/home/mobile/pager numbers, email, directory URI, MS URI, department, title, manager, UUID) into the `uds_directory` table; always writes `cucm_directory.csv` (override with `--directory-outfile`)
 - `--directory`: Harvest the unauthenticated CUCM corporate directory from `/cucm-uds/users` without any device probing or config downloads — requires `-H`; always writes `cucm_directory.csv` (override with `--directory-outfile`), prints a console table, and stores to `uds_directory` unless `--no-db`
