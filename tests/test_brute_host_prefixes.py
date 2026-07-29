@@ -180,3 +180,44 @@ def test_brute_mac_sep_name_resolves_cucm_from_db(monkeypatch, tmp_path, capsys)
     out = capsys.readouterr().out
     assert 'resolved from database' in out
     assert 'cucm-b' in out
+
+
+def test_brute_mac_no_cucm_does_not_crash_worker(monkeypatch, tmp_path, capsys):
+    """Regression: the no-CUCM path double-called queue.task_done(), crashing
+    the detect worker with 'task_done() called too many times'."""
+    import threading
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda *a, **kw: None)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda *a, **kw: None)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db_file = str(tmp_path / 'thief.db')
+    thief.init_database(db_file)
+
+    errors = []
+    orig = threading.excepthook
+    monkeypatch.setattr(threading, 'excepthook', lambda args: errors.append(args.exc_value))
+    monkeypatch.setattr('sys.argv',
+                        ['thief', '-b', '3', '-p', 'SEPC064E4D83AAF', '--db', db_file])
+    try:
+        with pytest.raises(SystemExit):
+            thief.main()
+    finally:
+        threading.excepthook = orig
+    assert errors == [], f'worker thread raised: {errors}'
+
+
+def test_brute_mac_sep_name_uses_sole_known_cucm(monkeypatch, tmp_path, capsys):
+    """With no -H and the device not recorded, fall back to the only CUCM host
+    known in the database."""
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda *a, **kw: None)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda *a, **kw: None)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db_file = str(tmp_path / 'thief.db')
+    thief.init_database(db_file)
+    # A different device seeds a single known CUCM host.
+    thief.log_mac_prefix_to_db('cucm-only', '10.0.0.9', 'AABBCCDDEEFF', 'AABBCCDDE', db_file)
+    monkeypatch.setattr('sys.argv',
+                        ['thief', '-b', '3', '-p', 'SEPC064E4D83AAF', '--db', db_file])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert 'only CUCM host known in the database: cucm-only' in out

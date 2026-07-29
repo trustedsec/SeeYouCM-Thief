@@ -3174,7 +3174,6 @@ def main():
                                 _safe_print(f'  ✗ Invalid brute_mac_len: {brute_mac_len} (must be <= 12)')
                                 with detect_lock:
                                     counts["fail"] += 1
-                                phone_queue.task_done()
                                 continue
                             partial_mac = full_mac[:prefix_len]
                             _safe_print(f'  ✓ Detected: SEP{full_mac}')
@@ -3190,13 +3189,26 @@ def main():
                                     phone_cucm = get_cucm_for_mac_from_db(full_mac, db_file)
                                     if phone_cucm:
                                         _safe_print(f'  ✓ CUCM {phone_cucm} resolved from database for SEP{full_mac}')
+                                    else:
+                                        # This exact device isn't recorded; fall
+                                        # back to a CUCM already known from an
+                                        # earlier scan of this database, but only
+                                        # when it is unambiguous.
+                                        known = set(get_known_cucm_hosts(db_file))
+                                        known |= {c for _, c in get_mac_prefixes_from_db(db_file) if c}
+                                        known = sorted(known)
+                                        if len(known) == 1:
+                                            phone_cucm = known[0]
+                                            _safe_print(f'  ✓ Using the only CUCM host known in the database: {phone_cucm}')
+                                        elif len(known) > 1:
+                                            _safe_print(f'  ✗ Multiple CUCM hosts in the database ({", ".join(known)}); cannot pick one')
+                                            _safe_print(f'  → Re-run with -H <cucm> to choose the target')
                                 if not phone_cucm:
                                     _safe_print(f'  ✗ Could not detect CUCM host from phone {phone}')
                                     _safe_print(f'  → Supply -H <cucm> (the phone was not reachable to auto-detect it)')
                                     _safe_print(f'  → Skipping this phone, continuing with others...\n')
                                     with detect_lock:
                                         counts["fail"] += 1
-                                    phone_queue.task_done()
                                     continue
 
                             _safe_print(f'  ✓ CUCM Server: {phone_cucm}')
