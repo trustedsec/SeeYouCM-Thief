@@ -97,3 +97,86 @@ def test_servers_feature_still_probes_uds_version(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         thief.main()
     assert len(calls) == 1
+
+
+def test_mac_from_phone_arg_plain_sep():
+    assert thief.mac_from_phone_arg('SEPC064E4D83AAF') == 'C064E4D83AAF'
+
+
+def test_mac_from_phone_arg_with_dns_suffix():
+    assert thief.mac_from_phone_arg('SEPC064E4D83AAF.mason.ad') == 'C064E4D83AAF'
+
+
+def test_mac_from_phone_arg_lowercase_normalised():
+    assert thief.mac_from_phone_arg('sepc064e4d83aaf') == 'C064E4D83AAF'
+
+
+def test_mac_from_phone_arg_ip_returns_none():
+    assert thief.mac_from_phone_arg('10.45.200.50') is None
+
+
+def test_mac_from_phone_arg_plain_hostname_returns_none():
+    assert thief.mac_from_phone_arg('phone-lobby.example.com') is None
+
+
+def test_mac_from_phone_arg_empty():
+    assert thief.mac_from_phone_arg('') is None
+
+
+def test_brute_mac_sep_name_skips_http_detection(monkeypatch, tmp_path, capsys):
+    """A SEP<MAC> passed to -p must not trigger an HTTP phone lookup and must
+    still yield its MAC when the phone is unreachable."""
+    def _boom(*a, **kw):
+        raise AssertionError('get_hostname_from_phone should not be called for a SEP name')
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', _boom)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db_file = str(tmp_path / 'thief.db')
+    thief.init_database(db_file)
+    monkeypatch.setattr('sys.argv',
+                        ['thief', '-b', '3', '-p', 'SEPC064E4D83AAF.mason.ad',
+                         '-H', 'cucm1', '--db', db_file])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert 'Using MAC from device name' in out
+    assert 'Detected: SEPC064E4D83AAF' in out
+    assert 'Could not detect hostname' not in out
+
+
+def test_get_cucm_for_mac_from_db_mac_prefixes(tmp_path):
+    db_file = _db(tmp_path)
+    thief.log_mac_prefix_to_db('cucm-a', '10.0.0.5', 'C064E4D83AAF', 'C064E4D83', db_file)
+    assert thief.get_cucm_for_mac_from_db('c064e4d83aaf', db_file) == 'cucm-a'
+    assert thief.get_cucm_for_mac_from_db('AABBCCDDEEFF', db_file) is None
+
+
+def test_get_cucm_for_mac_from_db_uds_devices(tmp_path):
+    db_file = _db(tmp_path)
+    thief.log_uds_device('cucm-b', 'alice', 'SEPC064E4D83AAF', 'userenum', db_file)
+    assert thief.get_cucm_for_mac_from_db('C064E4D83AAF', db_file) == 'cucm-b'
+
+
+def test_get_cucm_for_mac_from_db_missing_tables(tmp_path):
+    import sqlite3 as _sq
+    db_file = str(tmp_path / 'empty.db')
+    _sq.connect(db_file).close()
+    assert thief.get_cucm_for_mac_from_db('C064E4D83AAF', db_file) is None
+
+
+def test_brute_mac_sep_name_resolves_cucm_from_db(monkeypatch, tmp_path, capsys):
+    """-p SEP<MAC> with no -H and an unreachable phone should still find its
+    CUCM from a prior scan in the database."""
+    monkeypatch.setattr(thief, 'get_hostname_from_phone',
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError('no http')))
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda *a, **kw: None)
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
+    db_file = str(tmp_path / 'thief.db')
+    thief.init_database(db_file)
+    thief.log_uds_device('cucm-b', 'alice', 'SEPC064E4D83AAF', 'userenum', db_file)
+    monkeypatch.setattr('sys.argv',
+                        ['thief', '-b', '3', '-p', 'SEPC064E4D83AAF.mason.ad', '--db', db_file])
+    with pytest.raises(SystemExit):
+        thief.main()
+    out = capsys.readouterr().out
+    assert 'resolved from database' in out
+    assert 'cucm-b' in out

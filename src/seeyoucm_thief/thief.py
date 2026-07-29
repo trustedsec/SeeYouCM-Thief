@@ -435,6 +435,18 @@ def probe_uds(cucm_host, port=UDS_PORT, allow_fallback=True, timeout=10):
     return get_version(cucm_host, port=alt, timeout=timeout)
 
 
+def mac_from_phone_arg(phone):
+    """If a -p value already names the device (a SEP<MAC> hostname, optionally
+    with a DNS suffix like SEPC064E4D83AAF.mason.ad), the 12-hex MAC is in the
+    argument itself. Return it uppercased, or None if the value is a plain
+    IP/hostname that must be contacted to learn its MAC. Anchored to SEP so a
+    stray 12-hex run elsewhere in a hostname is not misread as a MAC."""
+    if not phone:
+        return None
+    m = re.search(r'SEP([0-9A-Fa-f]{12})(?![0-9A-Fa-f])', phone, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
 def get_hostname_from_phone(phone_ip):
     if _TEST_MODE:
         return os.getenv("THIEF_TEST_PHONE_HOSTNAME") or "SEPTEST00000000"
@@ -1041,6 +1053,39 @@ def get_uds_device_macs_from_db(cucm_host, db_file='thief.db'):
         if globals().get('debug', False):
             print(f'[!] get_uds_device_macs_from_db error: {e}')
     return rows
+
+
+def get_cucm_for_mac_from_db(full_mac, db_file='thief.db'):
+    """Return the CUCM host previously associated with a given device MAC, or
+    None. Lets ``--brute-mac -p SEP<MAC>`` resolve its CUCM from an earlier
+    scan when the phone itself is unreachable and no -H was supplied. Checks
+    mac_prefixes first (phone scans), then uds_devices (UDS harvests)."""
+    if not full_mac:
+        return None
+    mac = full_mac.upper()
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        try:
+            for sql, param in (
+                ('SELECT cucm_host FROM mac_prefixes WHERE UPPER(full_mac) = ? '
+                 'AND cucm_host IS NOT NULL ORDER BY discovery_time DESC LIMIT 1', mac),
+                ('SELECT cucm_host FROM uds_devices WHERE UPPER(device_name) = ? '
+                 'AND cucm_host IS NOT NULL ORDER BY discovery_time DESC LIMIT 1', f'SEP{mac}'),
+            ):
+                try:
+                    row = conn.execute(sql, (param,)).fetchone()
+                except sqlite3.OperationalError as e:
+                    if 'no such table' not in str(e):
+                        raise
+                    continue
+                if row and row[0]:
+                    return row[0]
+        finally:
+            conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_cucm_for_mac_from_db error: {e}')
+    return None
 
 
 def parse_uds_devices(xml_body):
@@ -3111,8 +3156,15 @@ def main():
                     break
                 try:
                     index = phone_index.get(phone, 0) + 1
-                    _safe_print(f'[{index}/{len(phones)}] Detecting MAC address from phone {phone}...')
-                    hostname = get_hostname_from_phone(phone)
+                    # A SEP<MAC> value carries the MAC directly; only fall back
+                    # to an HTTP lookup for plain IPs/hostnames, so an
+                    # unreachable phone named by its SEP address still works.
+                    if mac_from_phone_arg(phone):
+                        _safe_print(f'[{index}/{len(phones)}] Using MAC from device name {phone}...')
+                        hostname = phone
+                    else:
+                        _safe_print(f'[{index}/{len(phones)}] Detecting MAC address from phone {phone}...')
+                        hostname = get_hostname_from_phone(phone)
                     if hostname:
                         mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
                         if mac_match:
@@ -3131,8 +3183,16 @@ def main():
                                 phone_cucm = CUCM_host
                             else:
                                 phone_cucm = get_cucm_name_from_phone(phone)
+                                if not phone_cucm and not no_db:
+                                    # SEP name given but phone unreachable: the
+                                    # device may already be tied to a CUCM in the
+                                    # database from an earlier scan.
+                                    phone_cucm = get_cucm_for_mac_from_db(full_mac, db_file)
+                                    if phone_cucm:
+                                        _safe_print(f'  ✓ CUCM {phone_cucm} resolved from database for SEP{full_mac}')
                                 if not phone_cucm:
                                     _safe_print(f'  ✗ Could not detect CUCM host from phone {phone}')
+                                    _safe_print(f'  → Supply -H <cucm> (the phone was not reachable to auto-detect it)')
                                     _safe_print(f'  → Skipping this phone, continuing with others...\n')
                                     with detect_lock:
                                         counts["fail"] += 1
