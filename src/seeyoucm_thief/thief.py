@@ -2835,7 +2835,13 @@ def main():
         )
         quit(0)
 
-    if CUCM_host:
+    # The version probe only informs the UDS-based features; it queries the UDS
+    # port (8443) and has nothing to say for --brute-mac or plain config/phone
+    # scans. Running it unconditionally made those runs pay a full UDS read
+    # timeout and print a misleading "could not retrieve version" error against
+    # hosts where UDS is firewalled or not listening.
+    uds_feature = args.servers or args.directory or args.userenum or args.spray
+    if CUCM_host and uds_feature:
         version_info = get_version(CUCM_host, port=args.uds_port)
         if version_info:
             v = version_info.get('version', 'unknown')
@@ -3014,9 +3020,17 @@ def main():
             else:
                 db_prefixes = all_prefixes
             if not db_prefixes:
-                print('You must specify at least one phone with -p (or a CUCM server with -H) when using --brute-mac')
-                if not no_db:
-                    print('  (and no previously discovered phones were found in the database)')
+                if CUCM_host:
+                    # -H was given, but --brute-mac does not itself query the
+                    # server: it replays MAC prefixes already harvested into the
+                    # database by --userenum/--spray or an earlier phone scan.
+                    print(f'--brute-mac found no MAC prefixes for {CUCM_host} in the database.')
+                    print('  Run --userenum or --spray against it first, scan a phone with -p,')
+                    print('  or pass a phone IP directly with -p to seed prefixes.')
+                else:
+                    print('You must specify at least one phone with -p (or a CUCM server with -H) when using --brute-mac')
+                    if not no_db:
+                        print('  (and no previously discovered phones were found in the database)')
                 quit(1)
             prefix_len = 12 - brute_mac_len
             if prefix_len < 0:
