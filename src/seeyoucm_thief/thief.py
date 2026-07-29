@@ -29,8 +29,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Protocol ports
 # TFTP port is standard (69), HTTP_TFTP_PORT is configurable for fallback
 HTTP_TFTP_PORT = 6970
-# CUCM User Data Services (UDS) API — HTTPS only, default 8443
+# CUCM User Data Services (UDS) API — HTTPS only, default 8443.
+# When Contact Search Authentication is enabled on the cluster (CLI
+# `utils contactsearchauthentication enable`), UDS moves to 9443 and the
+# /users resource then requires Basic auth. Both are version-independent
+# (behaviour is identical on 11.5 through 15); the port is not gated on
+# the CUCM major version.
 UDS_PORT = 8443
+UDS_PORT_SECURE = 9443
 # Default output file for the standalone --directory harvest
 DEFAULT_DIRECTORY_OUTFILE = 'cucm_directory.csv'
 # Well-known default filenames the CUCM TFTP service hosts in addition to
@@ -380,7 +386,8 @@ def get_version(cucm_host, port=UDS_PORT, timeout=10):
     if not cucm_host:
         return None
     if _TEST_MODE:
-        return {'version': '12.5.1-TEST', 'prefix': '11.0(1)'}
+        return {'version': '12.5.1-TEST', 'prefix': '11.0(1)',
+                'usersAuthRequired': False, 'port': port}
 
     url = f'https://{cucm_host}:{port}/cucm-uds/version'
     dbg(f'UDS GET {url} (timeout={timeout}s)')
@@ -399,7 +406,45 @@ def get_version(cucm_host, port=UDS_PORT, timeout=10):
         m = re.search(rf'<{field}>([^<]+)</{field}>', resp.text)
         if m:
             info[field] = m.group(1).strip()
+    # UDS advertises whether /users needs Basic auth via this flag (present
+    # since 11.5). When true, unauthenticated --userenum/--directory/--spray
+    # will come back empty even though the version probe succeeded, so surface
+    # it rather than letting the operator read that as "no users".
+    auth_m = re.search(r'<usersResourceAuthEnabled>\s*(true|false)\s*</usersResourceAuthEnabled>',
+                       resp.text, re.IGNORECASE)
+    if auth_m:
+        info['usersAuthRequired'] = auth_m.group(1).lower() == 'true'
+    if info:
+        info['port'] = port
     return info or None
+
+
+def probe_uds(cucm_host, port=UDS_PORT, allow_fallback=True, timeout=10):
+    """Locate a live UDS endpoint, tolerating the 8443<->9443 split that
+    Contact Search Authentication introduces. Tries ``port`` first; if that
+    yields nothing and ``allow_fallback`` is set, tries the other standard UDS
+    port. Returns the version-info dict (with a resolved ``port`` key) or None.
+    ``allow_fallback`` should be False when the user pinned --uds-port."""
+    info = get_version(cucm_host, port=port, timeout=timeout)
+    if info or not allow_fallback:
+        return info
+    alt = UDS_PORT_SECURE if port == UDS_PORT else UDS_PORT
+    if alt == port:
+        return info
+    dbg(f'UDS version probe on :{port} failed; trying alternate port :{alt}')
+    return get_version(cucm_host, port=alt, timeout=timeout)
+
+
+def mac_from_phone_arg(phone):
+    """If a -p value already names the device (a SEP<MAC> hostname, optionally
+    with a DNS suffix like SEPC064E4D83AAF.mason.ad), the 12-hex MAC is in the
+    argument itself. Return it uppercased, or None if the value is a plain
+    IP/hostname that must be contacted to learn its MAC. Anchored to SEP so a
+    stray 12-hex run elsewhere in a hostname is not misread as a MAC."""
+    if not phone:
+        return None
+    m = re.search(r'SEP([0-9A-Fa-f]{12})(?![0-9A-Fa-f])', phone, re.IGNORECASE)
+    return m.group(1).upper() if m else None
 
 
 def get_hostname_from_phone(phone_ip):
@@ -1008,6 +1053,39 @@ def get_uds_device_macs_from_db(cucm_host, db_file='thief.db'):
         if globals().get('debug', False):
             print(f'[!] get_uds_device_macs_from_db error: {e}')
     return rows
+
+
+def get_cucm_for_mac_from_db(full_mac, db_file='thief.db'):
+    """Return the CUCM host previously associated with a given device MAC, or
+    None. Lets ``--brute-mac -p SEP<MAC>`` resolve its CUCM from an earlier
+    scan when the phone itself is unreachable and no -H was supplied. Checks
+    mac_prefixes first (phone scans), then uds_devices (UDS harvests)."""
+    if not full_mac:
+        return None
+    mac = full_mac.upper()
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        try:
+            for sql, param in (
+                ('SELECT cucm_host FROM mac_prefixes WHERE UPPER(full_mac) = ? '
+                 'AND cucm_host IS NOT NULL ORDER BY discovery_time DESC LIMIT 1', mac),
+                ('SELECT cucm_host FROM uds_devices WHERE UPPER(device_name) = ? '
+                 'AND cucm_host IS NOT NULL ORDER BY discovery_time DESC LIMIT 1', f'SEP{mac}'),
+            ):
+                try:
+                    row = conn.execute(sql, (param,)).fetchone()
+                except sqlite3.OperationalError as e:
+                    if 'no such table' not in str(e):
+                        raise
+                    continue
+                if row and row[0]:
+                    return row[0]
+        finally:
+            conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_cucm_for_mac_from_db error: {e}')
+    return None
 
 
 def parse_uds_devices(xml_body):
@@ -2841,21 +2919,34 @@ def main():
     # timeout and print a misleading "could not retrieve version" error against
     # hosts where UDS is firewalled or not listening.
     uds_feature = args.servers or args.directory or args.userenum or args.spray
+    # Effective UDS port for the feature calls below. The probe may resolve it
+    # to 9443 when Contact Search Authentication has moved UDS off 8443; if the
+    # user pinned --uds-port we honour it and skip the fallback.
+    uds_port = args.uds_port
     if CUCM_host and uds_feature:
-        version_info = get_version(CUCM_host, port=args.uds_port)
+        allow_fallback = args.uds_port == UDS_PORT
+        version_info = probe_uds(CUCM_host, port=args.uds_port, allow_fallback=allow_fallback)
         if version_info:
+            uds_port = version_info.get('port', args.uds_port)
             v = version_info.get('version', 'unknown')
             p = version_info.get('prefix')
             print(f'[+] CUCM {CUCM_host} version: {v}' + (f' (prefix {p})' if p else ''))
+            if uds_port != args.uds_port:
+                print(f'[*] UDS answered on :{uds_port} (Contact Search Authentication likely enabled); using it for this run')
+            if version_info.get('usersAuthRequired'):
+                print('[!] This cluster requires authentication for the UDS /users resource '
+                      '(usersResourceAuthEnabled=true).')
+                print('    Unauthenticated --userenum/--directory/--spray will return no users; '
+                      'valid CUCM credentials are needed.')
         else:
-            print(f'[-] Could not retrieve CUCM version from https://{CUCM_host}:{args.uds_port}/cucm-uds/version (run with -d for details)')
+            print(f'[-] Could not retrieve CUCM version from https://{CUCM_host}:{uds_port}/cucm-uds/version (run with -d for details)')
 
     if args.servers:
         if not CUCM_host:
             print('--servers requires -H/--host to specify the CUCM server')
             quit(1)
-        print(f'Enumerating CUCM cluster via https://{CUCM_host}:{args.uds_port}/cucm-uds/servers')
-        servers = get_servers_api(CUCM_host, port=args.uds_port)
+        print(f'Enumerating CUCM cluster via https://{CUCM_host}:{uds_port}/cucm-uds/servers')
+        servers = get_servers_api(CUCM_host, port=uds_port)
         if not servers:
             print('[-] No servers returned. Re-run with -d for request/response details.')
             quit(0)
@@ -2882,8 +2973,8 @@ def main():
         if not CUCM_host:
             print('--directory requires -H/--host to specify the CUCM server')
             quit(1)
-        print(f'Harvesting UDS directory from https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
-        records = get_user_directory_api(CUCM_host, port=args.uds_port)
+        print(f'Harvesting UDS directory from https://{CUCM_host}:{uds_port}/cucm-uds/users')
+        records = get_user_directory_api(CUCM_host, port=uds_port)
         if not records:
             print('[-] No directory records returned. Re-run with -d for request/response details.')
             quit(0)
@@ -2900,8 +2991,8 @@ def main():
         if not CUCM_host:
             print('--userenum requires -H/--host to specify the CUCM server')
             quit(1)
-        print(f'Getting users from UDS API at https://{CUCM_host}:{args.uds_port}/cucm-uds/users')
-        api_users = get_users_api(CUCM_host, port=args.uds_port)
+        print(f'Getting users from UDS API at https://{CUCM_host}:{uds_port}/cucm-uds/users')
+        api_users = get_users_api(CUCM_host, port=uds_port)
         if api_users:
             unique_users = list(set(api_users))
             with open(outfile, mode='w') as outputfile:
@@ -2917,7 +3008,7 @@ def main():
             if debug:
                 for username in unique_users:
                     print(f'{username}')
-            directory = get_user_directory_api(CUCM_host, port=args.uds_port)
+            directory = get_user_directory_api(CUCM_host, port=uds_port)
             if directory:
                 if not no_db:
                     written = record_uds_directory(CUCM_host, directory, db_file)
@@ -2932,7 +3023,7 @@ def main():
             if not no_db:
                 print(f'[*] Probing UDS for associated devices (unauthenticated)...')
                 found = enumerate_devices_unauthenticated(
-                    CUCM_host, args.uds_port, unique_users, db_file, threads=threads,
+                    CUCM_host, uds_port, unique_users, db_file, threads=threads,
                 )
                 if found:
                     print(f'[+] Found devices for {found} user(s) — attempting config downloads...')
@@ -2985,7 +3076,7 @@ def main():
 
         run_spray(
             cucm_host=CUCM_host,
-            port=args.uds_port,
+            port=uds_port,
             passwords=passwords,
             threads=args.spray_threads,
             rate_limit_hours=args.spray_rate_limit_hours,
@@ -3065,8 +3156,15 @@ def main():
                     break
                 try:
                     index = phone_index.get(phone, 0) + 1
-                    _safe_print(f'[{index}/{len(phones)}] Detecting MAC address from phone {phone}...')
-                    hostname = get_hostname_from_phone(phone)
+                    # A SEP<MAC> value carries the MAC directly; only fall back
+                    # to an HTTP lookup for plain IPs/hostnames, so an
+                    # unreachable phone named by its SEP address still works.
+                    if mac_from_phone_arg(phone):
+                        _safe_print(f'[{index}/{len(phones)}] Using MAC from device name {phone}...')
+                        hostname = phone
+                    else:
+                        _safe_print(f'[{index}/{len(phones)}] Detecting MAC address from phone {phone}...')
+                        hostname = get_hostname_from_phone(phone)
                     if hostname:
                         mac_match = re.search(r'SEP([0-9A-F]{12})', hostname, re.IGNORECASE)
                         if mac_match:
@@ -3085,8 +3183,16 @@ def main():
                                 phone_cucm = CUCM_host
                             else:
                                 phone_cucm = get_cucm_name_from_phone(phone)
+                                if not phone_cucm and not no_db:
+                                    # SEP name given but phone unreachable: the
+                                    # device may already be tied to a CUCM in the
+                                    # database from an earlier scan.
+                                    phone_cucm = get_cucm_for_mac_from_db(full_mac, db_file)
+                                    if phone_cucm:
+                                        _safe_print(f'  ✓ CUCM {phone_cucm} resolved from database for SEP{full_mac}')
                                 if not phone_cucm:
                                     _safe_print(f'  ✗ Could not detect CUCM host from phone {phone}')
+                                    _safe_print(f'  → Supply -H <cucm> (the phone was not reachable to auto-detect it)')
                                     _safe_print(f'  → Skipping this phone, continuing with others...\n')
                                     with detect_lock:
                                         counts["fail"] += 1
