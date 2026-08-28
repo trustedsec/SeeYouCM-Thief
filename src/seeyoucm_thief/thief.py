@@ -152,38 +152,85 @@ def enumerate_phones_subnet(input):
         return hosts
     return None
 
+class _TableContext:
+    __slots__ = ('open_row', 'open_cell')
+
+    def __init__(self):
+        self.open_row = None
+        self.open_cell = None
+
+
 class _StatusTableParser(HTMLParser):
     """Walks a Cisco phone status page's <tr>/<td> markup into ordered
     (label, value) pairs. Using a real parser instead of regex-on-raw-markup
     means tag case, extra whitespace, and HTML-entity-encoded punctuation
     (e.g. '-' as '&#x2D;') are handled for free instead of needing bespoke
-    regex fixes per firmware quirk."""
+    regex fixes per firmware quirk. Table boundaries are tracked explicitly
+    so an unclosed <td>/<tr> (legal, common in hand-rolled phone-firmware
+    HTML) implicitly closes its predecessor at the same table depth,
+    without corrupting genuinely nested tables (e.g. a nav-menu table
+    nested inside one <td> of the real data table)."""
+
+    _RAW_TEXT_TAGS = ('script', 'style')
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.rows = []
-        self._row_stack = []
-        self._cell_stack = []
+        self._contexts = [_TableContext()]
+        self._raw_text_tag = None
+
+    def _finalize_cell(self, ctx):
+        if ctx.open_cell is not None:
+            text = ''.join(ctx.open_cell).strip()
+            if text:
+                if ctx.open_row is None:
+                    ctx.open_row = []
+                ctx.open_row.append(text)
+            ctx.open_cell = None
+
+    def _finalize_row(self, ctx):
+        self._finalize_cell(ctx)
+        if ctx.open_row is not None:
+            if len(ctx.open_row) >= 2:
+                self.rows.append((ctx.open_row[0], ctx.open_row[1]))
+            ctx.open_row = None
 
     def handle_starttag(self, tag, attrs):
-        if tag == 'tr':
-            self._row_stack.append([])
+        if self._raw_text_tag is not None:
+            return
+        if tag in self._RAW_TEXT_TAGS:
+            self._raw_text_tag = tag
+            return
+        ctx = self._contexts[-1]
+        if tag == 'table':
+            self._contexts.append(_TableContext())
+        elif tag == 'tr':
+            self._finalize_row(ctx)
+            ctx.open_row = []
         elif tag in ('td', 'th'):
-            self._cell_stack.append([])
+            self._finalize_cell(ctx)
+            ctx.open_cell = []
 
     def handle_endtag(self, tag):
-        if tag in ('td', 'th') and self._cell_stack:
-            text = ''.join(self._cell_stack.pop()).strip()
-            if text and self._row_stack:
-                self._row_stack[-1].append(text)
-        elif tag == 'tr' and self._row_stack:
-            cells = self._row_stack.pop()
-            if len(cells) >= 2:
-                self.rows.append((cells[0], cells[1]))
+        if self._raw_text_tag is not None:
+            if tag == self._raw_text_tag:
+                self._raw_text_tag = None
+            return
+        ctx = self._contexts[-1]
+        if tag in ('td', 'th'):
+            self._finalize_cell(ctx)
+        elif tag == 'tr':
+            self._finalize_row(ctx)
+        elif tag == 'table' and len(self._contexts) > 1:
+            self._finalize_row(ctx)
+            self._contexts.pop()
 
     def handle_data(self, data):
-        if self._cell_stack:
-            self._cell_stack[-1].append(data)
+        if self._raw_text_tag is not None:
+            return
+        ctx = self._contexts[-1]
+        if ctx.open_cell is not None:
+            ctx.open_cell.append(data)
 
 
 def parse_status_table(page):
@@ -194,7 +241,11 @@ def parse_status_table(page):
         return []
     parser = _StatusTableParser()
     parser.feed(page)
+    parser.close()
+    for ctx in parser._contexts:
+        parser._finalize_row(ctx)
     return parser.rows
+
 
 _CM_LABEL_RE = re.compile(r'unified\s*cm|cucm|call\s*manager', re.IGNORECASE)
 _TFTP_LABEL_RE = re.compile(r'tftp\s*server', re.IGNORECASE)

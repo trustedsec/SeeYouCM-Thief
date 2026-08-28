@@ -176,6 +176,37 @@ def test_cucm_ignores_unrelated_active_marker_before_cm_row():
     )
     assert parse_cucm(page) == 'cucm02.example.com'
 
+def test_status_table_implicit_close_on_sibling_td():
+    # Real Cisco firmware sometimes omits closing </td> tags. A sibling
+    # <td> or <tr> starttag must implicitly close the still-open cell/row
+    # instead of silently dropping or corrupting it.
+    page = ('<tr><td>Unified CM1<td>cucm1.example.com Active</tr>'
+            '<tr><td>X</td><td>Y</td></tr>')
+    assert parse_status_table(page) == [
+        ('Unified CM1', 'cucm1.example.com Active'),
+        ('X', 'Y'),
+    ]
+
+def test_status_table_flushes_final_unclosed_row_at_eof():
+    # No closing tags at all anywhere in the document.
+    page = '<tr><td>A</td><td>B</td><tr><td>C</td><td>D</td>'
+    assert parse_status_table(page) == [('A', 'B'), ('C', 'D')]
+
+def test_status_table_ignores_script_and_style_content():
+    page = ('<tr><td>Unified CM1</td>'
+            '<td><script>var x=1;</script>cucm1.example.com</td></tr>')
+    assert parse_status_table(page) == [('Unified CM1', 'cucm1.example.com')]
+
+def test_cucm_unclosed_td_matches_old_behavior():
+    page = '<tr><td>Unified CM1<td>cucm1.example.com Active</tr>'
+    assert parse_cucm(page) == 'cucm1.example.com'
+
+def test_cucm_no_table_markup_returns_none():
+    # parse_cucm now requires actual <tr>/<td> table structure — a bare
+    # text string with no markup at all (which the old raw-regex
+    # implementation would have matched) intentionally returns None.
+    assert parse_cucm('CallManager 1 cucm1.example.com Active') is None
+
 def test_detect_phone_model_known():
     with open('tests/cisco-CP-7811-html-entities.html') as html_file:
         assert detect_phone_model(html_file.read()) == 'CP-7811'
