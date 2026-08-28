@@ -165,14 +165,9 @@ class _StatusTableParser(HTMLParser):
         self.rows = []
         self._row_stack = []
         self._cell_stack = []
-        self._pending_row = []
 
     def handle_starttag(self, tag, attrs):
         if tag == 'tr':
-            # Flush pending row before starting a new one
-            if self._pending_row and len(self._pending_row) >= 2:
-                self.rows.append((self._pending_row[0], self._pending_row[1]))
-            self._pending_row = []
             self._row_stack.append([])
         elif tag in ('td', 'th'):
             self._cell_stack.append([])
@@ -180,11 +175,8 @@ class _StatusTableParser(HTMLParser):
     def handle_endtag(self, tag):
         if tag in ('td', 'th') and self._cell_stack:
             text = ''.join(self._cell_stack.pop()).strip()
-            if text:
-                if self._row_stack:
-                    self._row_stack[-1].append(text)
-                else:
-                    self._pending_row.append(text)
+            if text and self._row_stack:
+                self._row_stack[-1].append(text)
         elif tag == 'tr' and self._row_stack:
             cells = self._row_stack.pop()
             if len(cells) >= 2:
@@ -203,9 +195,6 @@ def parse_status_table(page):
         return []
     parser = _StatusTableParser()
     parser.feed(page)
-    # Flush any pending row after EOF
-    if parser._pending_row and len(parser._pending_row) >= 2:
-        parser.rows.append((parser._pending_row[0], parser._pending_row[1]))
     return parser.rows
 
 def parse_cucm(page):
