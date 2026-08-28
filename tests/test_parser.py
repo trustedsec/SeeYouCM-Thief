@@ -160,6 +160,22 @@ def test_8851_html_entities_cucm():
     with open('tests/cisco-CP-8851-html-entities.html') as html_file:
         assert parse_cucm(html_file.read()) == 'hf-ucm-sub1.example.com'
 
+def test_cucm_ignores_unrelated_active_marker_before_cm_row():
+    # A field unrelated to CUCM that also happens to end in "... Active"
+    # earlier in the document must not be picked over the real CM row.
+    # The old whole-document regex `([A-Za-z0-9._-]+)\s+Active` had no
+    # label awareness and would have matched whichever "Active" came
+    # first in the raw markup, regardless of which field it belonged to.
+    page = (
+        '<table>'
+        '<tr><td><b>Some Other Field</b></td><td width=20></td>'
+        '<td><b>unrelated-value Active</b></td></tr>'
+        '<tr><td><b>Unified CM1</b></td><td width=20></td>'
+        '<td><b>cucm02.example.com  Active</b></td></tr>'
+        '</table>'
+    )
+    assert parse_cucm(page) == 'cucm02.example.com'
+
 def test_detect_phone_model_known():
     with open('tests/cisco-CP-7811-html-entities.html') as html_file:
         assert detect_phone_model(html_file.read()) == 'CP-7811'

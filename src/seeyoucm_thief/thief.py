@@ -3,7 +3,6 @@ import argparse
 import requests
 import re
 from html.parser import HTMLParser
-import html
 import ipaddress
 import socket
 import string
@@ -197,29 +196,41 @@ def parse_status_table(page):
     parser.feed(page)
     return parser.rows
 
+_CM_LABEL_RE = re.compile(r'unified\s*cm|cucm|call\s*manager', re.IGNORECASE)
+_TFTP_LABEL_RE = re.compile(r'tftp\s*server', re.IGNORECASE)
+_LEADING_HOST_RE = re.compile(r'^([A-Za-z0-9._-]+)')
+_ACTIVE_VALUE_RE = re.compile(r'^([A-Za-z0-9._-]+)\s+Active\b', re.IGNORECASE)
+
+
 def parse_cucm(page):
-    if not page:
+    rows = parse_status_table(page)
+    if not rows:
         return None
 
-    # Some phone firmwares (e.g. CP-7811, CP-8851) HTML-entity-encode
-    # punctuation in the status page (e.g. '-' as '&#x2D;'), which would
-    # otherwise truncate the hostname/domain regex match at the entity.
-    page = html.unescape(page)
+    cm_rows = [(label, value) for label, value in rows
+               if value and _CM_LABEL_RE.search(label)]
 
-    match = re.search(r'([A-Za-z0-9._-]+)\s+Active', page, re.IGNORECASE)
-    if match:
-        return match.group(1)
+    # Prefer whichever CM row is explicitly marked as the active node.
+    for _, value in cm_rows:
+        match = _ACTIVE_VALUE_RE.match(value)
+        if match:
+            return match.group(1)
 
-    # Fallbacks for older/alternate layouts without an "Active" marker.
-    match = re.search(r'(?:CallManager|Unified\s+CM|CUCM)\s*\d*.*?<b>\s*([A-Za-z0-9._-]+)',
-                      page, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1)
+    # No "Active" marker present (older/alternate layouts) — take the
+    # first CM row in document order, matching the field ordering phones
+    # use to list their primary CallManager first.
+    for _, value in cm_rows:
+        match = _LEADING_HOST_RE.match(value)
+        if match:
+            return match.group(1)
 
-    match = re.search(r'TFTP\s+Server\s*\d*.*?<b>\s*([A-Za-z0-9._-]+)',
-                      page, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1)
+    # Fall back to the TFTP server field, which is usually the same host.
+    tftp_rows = [(label, value) for label, value in rows
+                 if value and _TFTP_LABEL_RE.search(label)]
+    for _, value in tftp_rows:
+        match = _LEADING_HOST_RE.match(value)
+        if match:
+            return match.group(1)
 
     return None
 

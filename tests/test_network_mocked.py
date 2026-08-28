@@ -27,6 +27,7 @@ PHONE_NETWORK_PAGE = """
 <html><body>
 <td>Host name SEP001122334455</td>
 <tr>
+<td>CUCM Server</td>
 <td>cucm1.example.com Active</td>
 </tr>
 </body></html>
