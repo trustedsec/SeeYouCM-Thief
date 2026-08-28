@@ -2,6 +2,7 @@
 import argparse
 import requests
 import re
+from html.parser import HTMLParser
 import html
 import ipaddress
 import socket
@@ -151,6 +152,61 @@ def enumerate_phones_subnet(input):
                 pass
         return hosts
     return None
+
+class _StatusTableParser(HTMLParser):
+    """Walks a Cisco phone status page's <tr>/<td> markup into ordered
+    (label, value) pairs. Using a real parser instead of regex-on-raw-markup
+    means tag case, extra whitespace, and HTML-entity-encoded punctuation
+    (e.g. '-' as '&#x2D;') are handled for free instead of needing bespoke
+    regex fixes per firmware quirk."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows = []
+        self._row_stack = []
+        self._cell_stack = []
+        self._pending_row = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'tr':
+            # Flush pending row before starting a new one
+            if self._pending_row and len(self._pending_row) >= 2:
+                self.rows.append((self._pending_row[0], self._pending_row[1]))
+            self._pending_row = []
+            self._row_stack.append([])
+        elif tag in ('td', 'th'):
+            self._cell_stack.append([])
+
+    def handle_endtag(self, tag):
+        if tag in ('td', 'th') and self._cell_stack:
+            text = ''.join(self._cell_stack.pop()).strip()
+            if text:
+                if self._row_stack:
+                    self._row_stack[-1].append(text)
+                else:
+                    self._pending_row.append(text)
+        elif tag == 'tr' and self._row_stack:
+            cells = self._row_stack.pop()
+            if len(cells) >= 2:
+                self.rows.append((cells[0], cells[1]))
+
+    def handle_data(self, data):
+        if self._cell_stack:
+            self._cell_stack[-1].append(data)
+
+
+def parse_status_table(page):
+    """Parse a Cisco phone status page into ordered (label, value) pairs
+    from its <tr>/<td> rows. Rows with fewer than two non-empty cells
+    (e.g. single-cell nav-menu links) are dropped."""
+    if not page:
+        return []
+    parser = _StatusTableParser()
+    parser.feed(page)
+    # Flush any pending row after EOF
+    if parser._pending_row and len(parser._pending_row) >= 2:
+        parser.rows.append((parser._pending_row[0], parser._pending_row[1]))
+    return parser.rows
 
 def parse_cucm(page):
     if not page:

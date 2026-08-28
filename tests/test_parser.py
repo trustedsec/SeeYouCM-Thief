@@ -1,5 +1,48 @@
 #!/usr/env python3
-from thief import parse_cucm, parse_subnet, parse_filename, detect_phone_model, warn_if_unknown_phone_model, KNOWN_PHONE_MODELS
+from thief import parse_cucm, parse_subnet, parse_filename, detect_phone_model, warn_if_unknown_phone_model, KNOWN_PHONE_MODELS, parse_status_table
+
+def test_status_table_basic_row():
+    page = '<table><tr><td><b>Host Name</b></td><td width=20></td><td><b>SEP001122334455</b></td></tr></table>'
+    assert parse_status_table(page) == [('Host Name', 'SEP001122334455')]
+
+def test_status_table_skips_single_cell_rows():
+    # Nav-menu rows (e.g. "Device Information" links) have only one cell
+    # and must not be returned as label/value pairs.
+    page = '<table><tr><td><b><a href="/DeviceInformation">Device Information</a></b></td></tr></table>'
+    assert parse_status_table(page) == []
+
+def test_status_table_decodes_html_entities():
+    page = ('<TD><B> Unified CM1</B></TD><td width=20></TD>'
+            '<TD><B>cucm&#x2D;sub1&#x2D;ucce.example.com   </B></TD>')
+    assert parse_status_table(page) == [('Unified CM1', 'cucm-sub1-ucce.example.com')]
+
+def test_status_table_tolerates_uppercase_tags_and_multiline():
+    page = '''<TR><TD><B>CallManager 1</B></TD>
+<td width=20></TD>
+<TD><B>CUCM01.example.com  Active</B></TD>
+</TR>'''
+    assert parse_status_table(page) == [('CallManager 1', 'CUCM01.example.com  Active')]
+
+def test_status_table_handles_nested_layout_tables():
+    # Real phone pages nest a full navigation-menu <table> inside the
+    # first <td> of the outer layout row; the label/value table lives in
+    # a second nested table inside the outer row's second <td>. The
+    # single-cell nav rows must not corrupt extraction of the real rows.
+    page = '''
+    <TABLE><TR>
+      <TD>
+        <TABLE><TR><TD><B><a href="/DeviceInformation">Device Information</a></B></TD></TR></TABLE>
+      </TD>
+      <TD>
+        <TABLE><TR><TD><B>Host Name</B></TD><td width=20></TD><TD><B>SEP001122334455</B></TD></TR></TABLE>
+      </TD>
+    </TR></TABLE>
+    '''
+    assert parse_status_table(page) == [('Host Name', 'SEP001122334455')]
+
+def test_status_table_empty_input():
+    assert parse_status_table(None) == []
+    assert parse_status_table('') == []
 
 def test_6921_cucm():
     with open('tests/cisco_CP-6921.html') as html_file:
