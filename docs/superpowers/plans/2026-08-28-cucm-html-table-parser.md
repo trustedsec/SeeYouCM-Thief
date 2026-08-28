@@ -58,8 +58,8 @@ def test_status_table_skips_single_cell_rows():
     assert parse_status_table(page) == []
 
 def test_status_table_decodes_html_entities():
-    page = ('<TD><B> Unified CM1</B></TD><td width=20></TD>'
-            '<TD><B>cucm&#x2D;sub1&#x2D;ucce.example.com   </B></TD>')
+    page = ('<tr><TD><B> Unified CM1</B></TD><td width=20></TD>'
+            '<TD><B>cucm&#x2D;sub1&#x2D;ucce.example.com   </B></TD></tr>')
     assert parse_status_table(page) == [('Unified CM1', 'cucm-sub1-ucce.example.com')]
 
 def test_status_table_tolerates_uppercase_tags_and_multiline():
