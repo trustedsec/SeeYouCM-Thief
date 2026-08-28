@@ -2,6 +2,7 @@
 import argparse
 import requests
 import re
+import html
 import ipaddress
 import socket
 import string
@@ -50,6 +51,14 @@ DEFAULT_TFTP_FILES = (
 # Sentinel used in the full_mac slot of brute-force candidate tuples to
 # identify default-file tasks (not associated with a specific device MAC).
 DEFAULT_MAC_SENTINEL = 'DEFAULT'
+# Phone models whose status-page layout has a test fixture backing parse_cucm.
+# Models outside this set may use a page layout (field labels, HTML-entity
+# encoding, etc.) that hasn't been verified against the parser.
+KNOWN_PHONE_MODELS = {
+    'CP-6921', 'CP-7811', 'CP-7832', 'CP-7841', 'CP-7940G', 'CP-7945G',
+    'CP-8811', 'CP-8841', 'CP-8845', 'CP-8851', 'CP-8865', 'CP-8945',
+    'CP-DX80',
+}
 # Global variables
 debug = False
 found_credentials = []
@@ -126,6 +135,7 @@ def enumerate_phones_subnet(input):
                     if match:
                         phone_hostname = match.group(1)
                         filename = f"{phone_hostname}.cnf.xml"
+                        warn_if_unknown_phone_model(http_response.text)
                         cucm_host = parse_cucm(http_response.text)
                         return_url = f'http://{cucm_host}:6970/{filename}'
                         phone_object = {"ip": host, "hostname": phone_hostname, "url": return_url}
@@ -136,26 +146,51 @@ def enumerate_phones_subnet(input):
         return hosts
     return None
 
-def parse_cucm(html):
-    if not html:
+def parse_cucm(page):
+    if not page:
         return None
 
-    match = re.search(r'([A-Za-z0-9._-]+)\s+Active', html, re.IGNORECASE)
+    # Some phone firmwares (e.g. CP-7811, CP-8851) HTML-entity-encode
+    # punctuation in the status page (e.g. '-' as '&#x2D;'), which would
+    # otherwise truncate the hostname/domain regex match at the entity.
+    page = html.unescape(page)
+
+    match = re.search(r'([A-Za-z0-9._-]+)\s+Active', page, re.IGNORECASE)
     if match:
         return match.group(1)
 
     # Fallbacks for older/alternate layouts without an "Active" marker.
     match = re.search(r'(?:CallManager|Unified\s+CM|CUCM)\s*\d*.*?<b>\s*([A-Za-z0-9._-]+)',
-                      html, re.IGNORECASE | re.DOTALL)
+                      page, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1)
 
     match = re.search(r'TFTP\s+Server\s*\d*.*?<b>\s*([A-Za-z0-9._-]+)',
-                      html, re.IGNORECASE | re.DOTALL)
+                      page, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1)
 
     return None
+
+
+def detect_phone_model(page):
+    """Extract a Cisco model string like 'CP-7811' from a phone status page."""
+    if not page:
+        return None
+    match = re.search(r'\bCP-[A-Za-z0-9]{2,6}\b', page, re.IGNORECASE)
+    if match:
+        return match.group(0).upper()
+    return None
+
+
+def warn_if_unknown_phone_model(page):
+    """Flag phone models whose page layout hasn't been verified against parse_cucm."""
+    model = detect_phone_model(page)
+    if model and model not in KNOWN_PHONE_MODELS:
+        print(f'[!] Unknown phone model {model} - CUCM hostname parsing may be '
+              f'inaccurate. Run cisco-phone-query.sh against this phone and submit '
+              f'the generated cisco-{model}.html so support can be added.')
+    return model
 
 
 def parse_subnet(html):
@@ -444,6 +479,7 @@ def get_cucm_name_from_phone(phone_ip):
         dbg(f'CUCM discovery {phone_ip} raised {type(e).__name__}: {e}')
         return None
     dbg(f'CUCM discovery {phone_ip} -> {resp.status_code} ({len(resp.content)} bytes)')
+    warn_if_unknown_phone_model(resp.text)
     cucm = parse_cucm(resp.text)
     if not cucm:
         dbg(f'CUCM discovery {phone_ip}: no CUCM hostname matched in response body')
