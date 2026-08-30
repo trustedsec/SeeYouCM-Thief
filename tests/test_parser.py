@@ -1,5 +1,48 @@
 #!/usr/env python3
-from thief import parse_cucm, parse_subnet, parse_filename, detect_phone_model, warn_if_unknown_phone_model, KNOWN_PHONE_MODELS
+from thief import parse_cucm, parse_subnet, parse_filename, detect_phone_model, warn_if_unknown_phone_model, KNOWN_PHONE_MODELS, parse_status_table
+
+def test_status_table_basic_row():
+    page = '<table><tr><td><b>Host Name</b></td><td width=20></td><td><b>SEP001122334455</b></td></tr></table>'
+    assert parse_status_table(page) == [('Host Name', 'SEP001122334455')]
+
+def test_status_table_skips_single_cell_rows():
+    # Nav-menu rows (e.g. "Device Information" links) have only one cell
+    # and must not be returned as label/value pairs.
+    page = '<table><tr><td><b><a href="/DeviceInformation">Device Information</a></b></td></tr></table>'
+    assert parse_status_table(page) == []
+
+def test_status_table_decodes_html_entities():
+    page = ('<tr><TD><B> Unified CM1</B></TD><td width=20></TD>'
+            '<TD><B>cucm&#x2D;sub1&#x2D;ucce.example.com   </B></TD></tr>')
+    assert parse_status_table(page) == [('Unified CM1', 'cucm-sub1-ucce.example.com')]
+
+def test_status_table_tolerates_uppercase_tags_and_multiline():
+    page = '''<TR><TD><B>CallManager 1</B></TD>
+<td width=20></TD>
+<TD><B>CUCM01.example.com  Active</B></TD>
+</TR>'''
+    assert parse_status_table(page) == [('CallManager 1', 'CUCM01.example.com  Active')]
+
+def test_status_table_handles_nested_layout_tables():
+    # Real phone pages nest a full navigation-menu <table> inside the
+    # first <td> of the outer layout row; the label/value table lives in
+    # a second nested table inside the outer row's second <td>. The
+    # single-cell nav rows must not corrupt extraction of the real rows.
+    page = '''
+    <TABLE><TR>
+      <TD>
+        <TABLE><TR><TD><B><a href="/DeviceInformation">Device Information</a></B></TD></TR></TABLE>
+      </TD>
+      <TD>
+        <TABLE><TR><TD><B>Host Name</B></TD><td width=20></TD><TD><B>SEP001122334455</B></TD></TR></TABLE>
+      </TD>
+    </TR></TABLE>
+    '''
+    assert parse_status_table(page) == [('Host Name', 'SEP001122334455')]
+
+def test_status_table_empty_input():
+    assert parse_status_table(None) == []
+    assert parse_status_table('') == []
 
 def test_6921_cucm():
     with open('tests/cisco_CP-6921.html') as html_file:
@@ -116,6 +159,53 @@ def test_7811_html_entities_cucm():
 def test_8851_html_entities_cucm():
     with open('tests/cisco-CP-8851-html-entities.html') as html_file:
         assert parse_cucm(html_file.read()) == 'hf-ucm-sub1.example.com'
+
+def test_cucm_ignores_unrelated_active_marker_before_cm_row():
+    # A field unrelated to CUCM that also happens to end in "... Active"
+    # earlier in the document must not be picked over the real CM row.
+    # The old whole-document regex `([A-Za-z0-9._-]+)\s+Active` had no
+    # label awareness and would have matched whichever "Active" came
+    # first in the raw markup, regardless of which field it belonged to.
+    page = (
+        '<table>'
+        '<tr><td><b>Some Other Field</b></td><td width=20></td>'
+        '<td><b>unrelated-value Active</b></td></tr>'
+        '<tr><td><b>Unified CM1</b></td><td width=20></td>'
+        '<td><b>cucm02.example.com  Active</b></td></tr>'
+        '</table>'
+    )
+    assert parse_cucm(page) == 'cucm02.example.com'
+
+def test_status_table_implicit_close_on_sibling_td():
+    # Real Cisco firmware sometimes omits closing </td> tags. A sibling
+    # <td> or <tr> starttag must implicitly close the still-open cell/row
+    # instead of silently dropping or corrupting it.
+    page = ('<tr><td>Unified CM1<td>cucm1.example.com Active</tr>'
+            '<tr><td>X</td><td>Y</td></tr>')
+    assert parse_status_table(page) == [
+        ('Unified CM1', 'cucm1.example.com Active'),
+        ('X', 'Y'),
+    ]
+
+def test_status_table_flushes_final_unclosed_row_at_eof():
+    # No closing tags at all anywhere in the document.
+    page = '<tr><td>A</td><td>B</td><tr><td>C</td><td>D</td>'
+    assert parse_status_table(page) == [('A', 'B'), ('C', 'D')]
+
+def test_status_table_ignores_script_and_style_content():
+    page = ('<tr><td>Unified CM1</td>'
+            '<td><script>var x=1;</script>cucm1.example.com</td></tr>')
+    assert parse_status_table(page) == [('Unified CM1', 'cucm1.example.com')]
+
+def test_cucm_unclosed_td_matches_old_behavior():
+    page = '<tr><td>Unified CM1<td>cucm1.example.com Active</tr>'
+    assert parse_cucm(page) == 'cucm1.example.com'
+
+def test_cucm_no_table_markup_returns_none():
+    # parse_cucm now requires actual <tr>/<td> table structure — a bare
+    # text string with no markup at all (which the old raw-regex
+    # implementation would have matched) intentionally returns None.
+    assert parse_cucm('CallManager 1 cucm1.example.com Active') is None
 
 def test_detect_phone_model_known():
     with open('tests/cisco-CP-7811-html-entities.html') as html_file:
