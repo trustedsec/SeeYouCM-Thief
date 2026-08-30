@@ -3,6 +3,8 @@ import sqlite3
 import subprocess
 import pytest
 
+pytestmark = pytest.mark.e2e
+
 TEST_DB = 'test_pytest.db'
 MOCK_CONFIG = '''<device>
 <sshUserId>admin</sshUserId>
@@ -10,11 +12,6 @@ MOCK_CONFIG = '''<device>
 <userId>user</userId>
 <adminPassword>secret</adminPassword>
 </device>'''
-
-def setup_module(module):
-    # Remove any existing test DB
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
 
 @pytest.fixture
 def patch_download(monkeypatch):
@@ -24,16 +21,12 @@ def patch_download(monkeypatch):
     monkeypatch.setattr(thief, 'download_config_http', lambda *a, **kw: MOCK_CONFIG)
 
 @pytest.mark.usefixtures('patch_download')
-def test_db_write_and_show_db():
-    # Use a static DB file in the tests/ directory
-    db_path = os.path.join(os.path.dirname(__file__), TEST_DB)
-    # Remove if exists
-    if os.path.exists(db_path):
-        os.remove(db_path)
+def test_db_write_and_show_db(tmp_path, thief_script):
+    db_path = str(tmp_path / TEST_DB)
     env = os.environ.copy()
     env["PYTEST_CURRENT_TEST"] = "1"
     result = subprocess.run([
-        'python3', 'thief.py', '-H', 'mock-cucm', '-p', '1.2.3.4', '--db', db_path
+        'python3', thief_script, '-H', 'mock-cucm', '-p', '1.2.3.4', '--db', db_path
     ], capture_output=True, text=True, env=env)
     assert result.returncode == 0
     # Now check the DB contents
@@ -48,7 +41,7 @@ def test_db_write_and_show_db():
     assert 'pass123' in passwords
     # Check --show-db output
     show_result = subprocess.run([
-        'python3', 'thief.py', '--show-db', '--db', db_path
+        'python3', thief_script, '--show-db', '--db', db_path
     ], capture_output=True, text=True, env=env)
     assert 'admin' in show_result.stdout
     assert 'pass123' in show_result.stdout

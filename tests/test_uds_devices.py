@@ -8,18 +8,6 @@ import requests
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    p = tmp_path / "thief.db"
-    thief.init_database(str(p))
-    return str(p)
-
-
 def _rows(db_path, sql, params=()):
     conn = sqlite3.connect(db_path)
     rows = conn.execute(sql, params).fetchall()

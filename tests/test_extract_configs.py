@@ -212,6 +212,7 @@ class TestExtractConfigsDebugLogging:
         assert 'SEP1.cnf.xml' in captured.out
 
 
+@pytest.mark.e2e
 class TestExtractConfigsCli:
     def test_cli_extracts_files(self, tmp_path):
         db_path = tmp_path / 'thief.db'

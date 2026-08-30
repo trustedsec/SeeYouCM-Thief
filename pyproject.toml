@@ -27,4 +27,30 @@ version_scheme = "guess-next-dev"
 [dependency-groups]
 dev = [
     "pytest==9.0.3",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "unit: fast isolated tests, no subprocess and no sockets",
+    "smoke: in-process main() CLI dispatch checks",
+    "e2e: subprocess CLI runs against a temp database",
+    "integration: tests that hit real devices/services",
+]
+
+[tool.coverage.run]
+source = ["src/seeyoucm_thief"]
+branch = true
+
+[tool.coverage.report]
+# Baseline after the Aug 2026 test-suite overhaul was 60%; floor set 5 points
+# below so normal churn doesn't break CI but a real regression does. Raise
+# this as coverage grows.
+fail_under = 55
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "def banner",
 ]

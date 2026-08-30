@@ -13,20 +13,6 @@ import requests
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    """Return a path to a freshly-initialized thief.db in tmp_path."""
-    p = tmp_path / "thief.db"
-    thief.init_database(str(p))
-    return str(p)
-
-
 def _table_columns(db_path, table):
     conn = sqlite3.connect(db_path)
     try:
@@ -495,6 +481,7 @@ def test_run_spray_skips_probe_when_disabled(monkeypatch, db_path):
 
 
 def test_cli_requires_password_when_spray(monkeypatch, capsys):
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
     monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray'])
     with pytest.raises(SystemExit):
         thief.main()
@@ -503,6 +490,7 @@ def test_cli_requires_password_when_spray(monkeypatch, capsys):
 
 
 def test_cli_rejects_both_password_and_passwords_file(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
     pw = tmp_path / "p.txt"
     pw.write_text("x\n")
     monkeypatch.setattr('sys.argv', [
@@ -514,6 +502,7 @@ def test_cli_rejects_both_password_and_passwords_file(monkeypatch, tmp_path, cap
 
 
 def test_cli_rejects_spray_with_brute_mac(monkeypatch, capsys):
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac',
     ])
@@ -596,6 +585,7 @@ def test_show_db_prints_spray_hits(db_path, capsys):
 
 def test_cli_directory_as_password_file_errors_cleanly(monkeypatch, tmp_path, capsys):
     """Passing a directory to -P should print a clean error, not a traceback."""
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
     db = tmp_path / "thief.db"
     target_dir = tmp_path / "not-a-file"
     target_dir.mkdir()
@@ -703,6 +693,7 @@ def test_cli_spray_user_as_pass_invokes_run_spray_correctly(monkeypatch, tmp_pat
 
 
 def test_cli_spray_user_as_pass_mutually_exclusive_with_password(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(thief, 'get_version', lambda *a, **kw: None)
     db = tmp_path / "thief.db"
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray',

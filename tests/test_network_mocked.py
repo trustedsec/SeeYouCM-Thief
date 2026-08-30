@@ -54,12 +54,6 @@ PHONE_NETWORK_PAGE_NO_HOSTNAME = """
 """
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
 # ---------------------------------------------------------------------------
 # download_config_http
 # ---------------------------------------------------------------------------
@@ -397,15 +391,16 @@ class TestSearchForSecrets:
         assert creds == []
         assert users == []
 
-    def test_phone_password_tag_not_extracted(self, monkeypatch):
-        # BUG: phonePassword (regex group 6) is matched but never handled in the
-        # code - only groups 2-5 are checked. This test documents the current behavior.
+    def test_phone_password_tag_is_extracted(self, monkeypatch):
+        # Regression test: phonePassword (regex group 6) is matched AND
+        # consumed into credentials (fixed - previously silently dropped).
         config = "<device>\n<phonePassword>phone123</phonePassword>\n</device>"
         monkeypatch.setattr(thief, 'download_config_tftp', lambda *a, **kw: config)
 
         creds, users = thief.search_for_secrets('10.0.0.1', 'SEP001122334455.cnf.xml')
         passwords = [c[1] for c in creds]
-        assert 'phone123' not in passwords  # group 6 is never processed
+        assert 'phone123' in passwords
+        assert creds == [('unknown', 'phone123', 'SEP001122334455.cnf.xml')]
 
 
 # ---------------------------------------------------------------------------

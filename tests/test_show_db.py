@@ -1,17 +1,16 @@
-import os
 import sqlite3
 import subprocess
 import pytest
 
+pytestmark = pytest.mark.e2e
+
 TEST_DB = 'test_pytest.db'
 
-@pytest.fixture(scope='module')
-def setup_test_db():
-    # Remove any existing test DB
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+@pytest.fixture
+def setup_test_db(tmp_path):
+    db_path = str(tmp_path / TEST_DB)
     # Create DB and all required tables
-    conn = sqlite3.connect(TEST_DB)
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS credentials (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,10 +60,7 @@ def setup_test_db():
     ])
     conn.commit()
     conn.close()
-    yield TEST_DB
-    # Teardown
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+    yield db_path
 
 def test_credentials_query(setup_test_db):
     conn = sqlite3.connect(setup_test_db)
@@ -76,10 +72,10 @@ def test_credentials_query(setup_test_db):
     assert rows[0][2] == 'SEP001122334455'
     assert rows[1][3] == 'user'
 
-def test_show_db_output(setup_test_db):
+def test_show_db_output(setup_test_db, thief_script):
     # Run the script with --show-db and the test DB
     result = subprocess.run([
-        'python3', 'thief.py', '--show-db', '--db', setup_test_db
+        'python3', thief_script, '--show-db', '--db', setup_test_db
     ], capture_output=True, text=True)
     # Output should mention the mock credentials
     assert 'SEP001122334455' in result.stdout

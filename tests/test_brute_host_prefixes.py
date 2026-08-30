@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import thief
 
 
@@ -32,7 +34,8 @@ def test_uds_device_macs_missing_table(tmp_path):
     assert thief.get_uds_device_macs_from_db('cucm1', db_file) == []
 
 
-def test_brute_mac_accepts_host_without_phone(tmp_path):
+@pytest.mark.e2e
+def test_brute_mac_accepts_host_without_phone(tmp_path, thief_script):
     import os
     import subprocess
 
@@ -43,7 +46,7 @@ def test_brute_mac_accepts_host_without_phone(tmp_path):
     env = os.environ.copy()
     env['PYTEST_CURRENT_TEST'] = '1'
     result = subprocess.run(
-        ['python3', 'thief.py', '-b', '1', '-H', 'cucm1', '--db', db_file],
+        ['python3', thief_script, '-b', '1', '-H', 'cucm1', '--db', db_file],
         capture_output=True, text=True, env=env, timeout=300,
     )
     assert 'You must specify at least one phone' not in result.stdout
