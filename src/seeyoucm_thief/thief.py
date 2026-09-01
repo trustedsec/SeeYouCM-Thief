@@ -528,8 +528,9 @@ def get_version(cucm_host, port=UDS_PORT, timeout=10):
     if not cucm_host:
         return None
     if _TEST_MODE:
-        return {'version': '12.5.1-TEST', 'prefix': '11.0(1)',
-                'usersAuthRequired': False, 'port': port}
+        return {'version': '12.5.1-TEST', 'schemaVersion': '10.0.0',
+                'usersAuthRequired': False, 'upgradeInProgress': False,
+                'port': port}
 
     url = f'https://{cucm_host}:{port}/cucm-uds/version'
     dbg(f'UDS GET {url} (timeout={timeout}s)')
@@ -543,11 +544,25 @@ def get_version(cucm_host, port=UDS_PORT, timeout=10):
         dbg(f'UDS version non-200 body (first 300 chars): {resp.text[:300]!r}')
         return None
 
+    # Per the v14 schema (version.get.xsd) the whole response is:
+    #   <versionInformation uri=... version=...>   <- version attr = UDS schema
+    #     <version>14.0.1</version>                <- element = CUCM version
+    #     <capabilities>
+    #       <usersResourceAuthEnabled>bool</usersResourceAuthEnabled>
+    #       <upgradeInProgress>bool</upgradeInProgress>
+    #     </capabilities>
+    #   </versionInformation>
+    # There are no other elements; <capabilities> is mandatory on 14 but absent
+    # before 11.5(1), so both flags stay unset on older clusters.
     info = {}
-    for field in ('version', 'prefix'):
-        m = re.search(rf'<{field}>([^<]+)</{field}>', resp.text)
-        if m:
-            info[field] = m.group(1).strip()
+    m = re.search(r'<version>([^<]+)</version>', resp.text)
+    if m:
+        info['version'] = m.group(1).strip()
+    # The version= attribute on the wrapper is the UDS schema version, which is
+    # distinct from the CUCM version in the <version> element.
+    m = re.search(r'<versionInformation\b[^>]*\bversion="([^"]+)"', resp.text)
+    if m:
+        info['schemaVersion'] = m.group(1).strip()
     # UDS advertises whether /users needs Basic auth via this flag (present
     # since 11.5). When true, unauthenticated --userenum/--directory/--spray
     # will come back empty even though the version probe succeeded, so surface
@@ -556,6 +571,12 @@ def get_version(cucm_host, port=UDS_PORT, timeout=10):
                        resp.text, re.IGNORECASE)
     if auth_m:
         info['usersAuthRequired'] = auth_m.group(1).lower() == 'true'
+    # A cluster mid-upgrade can return partial or inconsistent directory data,
+    # so results captured now should not be trusted as a complete baseline.
+    upg_m = re.search(r'<upgradeInProgress>\s*(true|false)\s*</upgradeInProgress>',
+                      resp.text, re.IGNORECASE)
+    if upg_m:
+        info['upgradeInProgress'] = upg_m.group(1).lower() == 'true'
     if info:
         info['port'] = port
     return info or None
@@ -705,11 +726,36 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
     return filenames
 
 
+def _parse_uds_users_wrapper(body):
+    """Extract the paging attributes from the <users> wrapper element.
+
+    The v14 UDS schema (users.get.xsd) declares start, requestedCount,
+    returnedCount and totalCount as use="required", so a conformant response
+    always carries all four. Returns a dict of the ones actually present, so a
+    non-conformant server degrades to the <userName>-counting fallback rather
+    than raising."""
+    m = re.search(r'<users\b([^>]*)>', body)
+    if not m:
+        return {}
+    attrs = m.group(1)
+    found = {}
+    for name in ('start', 'requestedCount', 'returnedCount', 'totalCount'):
+        am = re.search(rf'\b{name}="(-?\d+)"', attrs)
+        if am:
+            found[name] = int(am.group(1))
+    return found
+
+
 def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     """Yield each /cucm-uds/users page's response body text, following UDS
     pagination. Shared by get_users_api and get_user_directory_api so the
-    page-walking logic lives in one place. Pagination 'item count' is measured by
-    <userName> occurrences (UDS paginates per user)."""
+    page-walking logic lives in one place.
+
+    Paging is driven by the <users> wrapper's own start/returnedCount
+    attributes: the next offset is start + returnedCount by construction, which
+    avoids having to assume whether UDS indexes from 0 or 1 (it is 0-based). If
+    a server omits those attributes, fall back to counting <userName>
+    occurrences and offsetting by the running total."""
     base = f'https://{cucm_host}:{port}/cucm-uds/users'
     seen_urls = set()
     next_url = base
@@ -741,20 +787,37 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
             dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
             break
 
+        wrapper = _parse_uds_users_wrapper(resp.text)
+
         yield resp.text
         collected += page_count
 
-        if total is None:
-            total_match = re.search(r'<users\b[^>]*\btotalCount="(\d+)"', resp.text) \
-                or re.search(r'<totalCount>(\d+)</totalCount>', resp.text)
-            if total_match:
-                total = int(total_match.group(1))
-                dbg(f'UDS server reports totalCount={total}')
+        if total is None and 'totalCount' in wrapper:
+            total = wrapper['totalCount']
+            dbg(f'UDS server reports totalCount={total}')
 
         if total is not None and collected >= total:
             break
 
-        next_url = _uds_next_link(resp.text, base, collected + 1)
+        # Prefer the server's own offset arithmetic. requestedCount >
+        # returnedCount means the server clamped the page below what was asked
+        # for (UserSearchLimit), which is normal and not an error.
+        if 'start' in wrapper and 'returnedCount' in wrapper:
+            if wrapper['returnedCount'] <= 0:
+                dbg('UDS returnedCount=0; stopping pagination')
+                break
+            requested = wrapper.get('requestedCount')
+            if requested is not None and requested > wrapper['returnedCount']:
+                dbg(f'UDS clamped page size: requested {requested}, '
+                    f'returned {wrapper["returnedCount"]}')
+            next_start = wrapper['start'] + wrapper['returnedCount']
+        else:
+            # Non-conformant server: offset by what we have actually collected.
+            # start is 0-based, so the next page begins at `collected`, not
+            # `collected + 1`.
+            next_start = collected
+
+        next_url = _uds_next_link(base, next_start)
         if not next_url:
             dbg('UDS no next-page link found; stopping pagination')
             break
@@ -808,7 +871,11 @@ def parse_uds_directory(xml_body):
             continue
         record = {'username': name_match.group(1).strip()}
         for key, tag in _UDS_DIRECTORY_FIELDS:
-            m = re.search(rf'<{tag}>([^<]*)</{tag}>', block)
+            # Tolerate attributes on the element: users.get.xsd gives
+            # <directoryUri> an optional exist="true|false" attribute, and a
+            # bare <tag> match silently yields '' when CUCM sets it. \b keeps
+            # <id> from matching a longer tag that merely starts with "id".
+            m = re.search(rf'<{tag}\b[^>]*>([^<]*)</{tag}>', block)
             record[key] = m.group(1).strip() if m else ''
         records.append(record)
     return records
@@ -834,7 +901,7 @@ def get_user_directory_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000
 
 def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
     if _TEST_MODE:
-        return [{'hostName': 'cucm-pub.test', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'}]
+        return [{'hostName': 'cucm-pub.test'}, {'hostName': 'cucm-sub1.test'}]
 
     url = f'https://{cucm_host}:{port}/cucm-uds/servers'
     dbg(f'UDS GET {url} (timeout={timeout}s)')
@@ -848,36 +915,31 @@ def get_servers_api(cucm_host, port=UDS_PORT, timeout=10):
         dbg(f'UDS servers non-200 body (first 300 chars): {resp.text[:300]!r}')
         return []
 
+    # The v14 schema (servers.get.xsd) declares <server> as type="xs:string" —
+    # a bare hostname with no child elements, and the schema permits none. This
+    # is the only shape UDS has ever published (10.0(1) through 14), so there is
+    # no version branching to do here. UDS exposes no addresses and no server
+    # role: resolving a hostname to an IP is a DNS lookup on our side, and
+    # Publisher/Subscriber role requires AXL.
     servers = []
     for block in re.findall(r'<server\b[^>]*>(.*?)</server>', resp.text, re.DOTALL):
-        srv = {}
-        for field in ('hostName', 'ipv4Address', 'ipv6Address', 'serverType'):
-            m = re.search(rf'<{field}>([^<]+)</{field}>', block)
-            if m:
-                srv[field] = m.group(1).strip()
-        if not srv:
-            # Newer UDS (15.x+) returns the hostname as plain text inside
-            # <server>...</server> with no child elements.
-            text = re.sub(r'<[^>]+>', '', block).strip()
-            if text:
-                srv['hostName'] = text
-        if srv:
-            servers.append(srv)
+        host = block.strip()
+        if host:
+            servers.append({'hostName': host})
     dbg(f'UDS parsed {len(servers)} server entries from cluster topology')
     return servers
 
 
-def _uds_next_link(body, base_url, fallback_start):
-    # HATEOAS variants seen in CUCM UDS responses
-    m = re.search(r'<link\b[^>]*\brel="next"[^>]*\bhref="([^"]+)"', body, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    m = re.search(r'<next>([^<]+)</next>', body, re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    # Fallback: try ?start=N (most common Cisco UDS pagination param)
+def _uds_next_link(base_url, start):
+    """Build the URL for the UDS /users page beginning at offset ``start``.
+
+    UDS exposes no HATEOAS paging links — the v14 schema's <users> wrapper
+    permits only the uri/version/start/requestedCount/returnedCount/totalCount
+    attributes and <user> children, with no <link rel="next"> or <next>
+    element in any published release. Client-side offset arithmetic on the
+    0-based ``start`` parameter is the only paging mechanism available."""
     sep = '&' if '?' in base_url else '?'
-    return f'{base_url}{sep}start={fallback_start}'
+    return f'{base_url}{sep}start={start}'
 
 
 def log_uds_usernames_to_db(cucm_host, usernames, db_file='thief.db'):
@@ -2176,6 +2238,11 @@ def log_cluster_servers_to_db(queried_host, servers, db_file='thief.db'):
         inserted = 0
         for srv in servers:
             hostname = srv.get('hostName') or ''
+            # UDS /cucm-uds/servers returns only a hostname per <server> (v14
+            # schema: type="xs:string"). ipv4/ipv6/server_type are retained as
+            # columns for a future DNS-resolution or AXL enrichment step and for
+            # compatibility with existing thief.db files, but nothing UDS
+            # returns can populate them.
             ipv4 = srv.get('ipv4Address') or ''
             ipv6 = srv.get('ipv6Address') or ''
             server_type = srv.get('serverType') or ''
@@ -2563,10 +2630,13 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
         if cluster_servers:
             print(f'\n\033[1m[+] CUCM CLUSTER SERVERS ({len(cluster_servers)} total)\033[0m')
             print("-"*70)
-            print(f'{"Queried Host":<24} {"Hostname":<30} {"IPv4":<16}')
+            # No address column: UDS /cucm-uds/servers returns only a hostname
+            # per cluster member, so ipv4/ipv6/server_type are always empty for
+            # rows this tool writes (see log_cluster_servers_to_db).
+            print(f'{"Queried Host":<24} {"Hostname":<30} {"Discovered":<20}')
             print("-"*70)
             for queried, hostname, ipv4, ipv6, srv_type, timestamp in cluster_servers:
-                print(f'{queried:<24} {(hostname or ""):<30} {(ipv4 or ""):<16}')
+                print(f'{queried:<24} {(hostname or ""):<30} {(timestamp or ""):<20}')
 
         if spray_hits:
             print('\n=== UDS Spray Hits ===')
@@ -3072,10 +3142,14 @@ def main():
         if version_info:
             uds_port = version_info.get('port', args.uds_port)
             v = version_info.get('version', 'unknown')
-            p = version_info.get('prefix')
-            print(f'[+] CUCM {CUCM_host} version: {v}' + (f' (prefix {p})' if p else ''))
+            sv = version_info.get('schemaVersion')
+            print(f'[+] CUCM {CUCM_host} version: {v}' + (f' (UDS schema {sv})' if sv else ''))
             if uds_port != args.uds_port:
                 print(f'[*] UDS answered on :{uds_port} (Contact Search Authentication likely enabled); using it for this run')
+            if version_info.get('upgradeInProgress'):
+                print('[!] CUCM reports an upgrade in progress (upgradeInProgress=true).')
+                print('    UDS results may be incomplete or inconsistent; treat this run as '
+                      'provisional and re-enumerate once the upgrade finishes.')
             if version_info.get('usersAuthRequired'):
                 print('[!] This cluster requires authentication for the UDS /users resource '
                       '(usersResourceAuthEnabled=true).')
@@ -3095,18 +3169,7 @@ def main():
             quit(0)
         print(f'[+] Discovered {len(servers)} cluster member(s):')
         for srv in servers:
-            host = srv.get('hostName', '?')
-            ipv4 = srv.get('ipv4Address', '')
-            ipv6 = srv.get('ipv6Address', '')
-            srv_type = srv.get('serverType', '')
-            parts = [host]
-            if ipv4:
-                parts.append(f'({ipv4})')
-            if ipv6:
-                parts.append(f'[v6: {ipv6}]')
-            if srv_type:
-                parts.append(f'<{srv_type}>')
-            print('    ' + ' '.join(parts))
+            print('    ' + srv.get('hostName', '?'))
         if not no_db:
             inserted = log_cluster_servers_to_db(CUCM_host, servers, db_file)
             print(f'[+] Logged {inserted} new cluster server entry/entries to database')

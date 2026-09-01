@@ -197,7 +197,7 @@ Export to CSV:
 - `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names incl. nickname, phone/home/mobile/pager numbers, email, directory URI, MS URI, department, title, manager, UUID) into the `uds_directory` table; always writes `cucm_directory.csv` (override with `--directory-outfile`)
 - `--directory`: Harvest the unauthenticated CUCM corporate directory from `/cucm-uds/users` without any device probing or config downloads — requires `-H`; always writes `cucm_directory.csv` (override with `--directory-outfile`), prints a console table, and stores to `uds_directory` unless `--no-db`
 - `--directory-outfile FILENAME`: Override the default CSV output path for `--directory` and `--userenum` (default: `cucm_directory.csv`)
-- `--servers`: Enumerate CUCM cluster members (hostnames + IPs) via UDS `/cucm-uds/servers` — requires `-H`
+- `--servers`: Enumerate CUCM cluster members via UDS `/cucm-uds/servers` — requires `-H`. UDS returns a hostname per cluster member and nothing else, so addresses and Publisher/Subscriber roles are not available from this endpoint
 - `--http`: Use HTTP (port 6970) as the primary config download protocol with TFTP fallback (default: TFTP first, HTTP fallback)
 - `--uds-port PORT`: Override the CUCM UDS API HTTPS port for `--userenum`, `--directory`, and `--servers` (default: 8443)
 - `--spray`: Password-spray the UDS API (requires `-H`; mutually exclusive with `--brute-mac`)
