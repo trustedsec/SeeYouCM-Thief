@@ -359,8 +359,9 @@ def test_run_verify_chases_configs_for_dumped_devices(tmp_path, monkeypatch):
 
     chased = {}
 
-    def fake_download(host, device_names, db_file, use_tftp=True, no_db=False):
+    def fake_download(host, device_names, db_file, use_tftp=True, no_db=False, threads=10):
         chased["args"] = (host, list(device_names), use_tftp)
+        chased["threads"] = threads
         return 1
 
     thief.run_verify(
@@ -370,10 +371,12 @@ def test_run_verify_chases_configs_for_dumped_devices(tmp_path, monkeypatch):
         threads=4,
         db_file=db,
         use_tftp=False,
+        download_threads=25,
         _dump_fn=fake_dump,
         _download_fn=fake_download,
     )
     assert chased["args"] == ("h1", ["SEP001122334455", "SEPAABBCCDDEEFF"], False)
+    assert chased["threads"] == 25  # download concurrency threaded through
 
 
 def test_run_verify_skips_config_chase_when_no_devices(tmp_path, monkeypatch):

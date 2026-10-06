@@ -202,7 +202,7 @@ def test_cli_verify_dispatches(tmp_path, monkeypatch):
     thief.init_database(db)
     captured = {}
 
-    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True, download_threads=10):
         captured["port"] = port
         captured["threads"] = threads
         captured["db_file"] = db_file
@@ -226,7 +226,7 @@ def test_cli_verify_http_flag_flips_transport(tmp_path, monkeypatch):
     thief.init_database(db)
     captured = {}
 
-    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True, download_threads=10):
         captured["use_tftp"] = use_tftp
         return None
 
@@ -244,7 +244,7 @@ def test_cli_verify_no_device_dump_flag(tmp_path, monkeypatch):
     thief.init_database(db)
     captured = {}
 
-    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True, download_threads=10):
         captured["dump_devices"] = dump_devices
         return None
 
