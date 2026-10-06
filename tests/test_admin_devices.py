@@ -344,6 +344,81 @@ def test_run_verify_dump_disabled(tmp_path, monkeypatch):
     assert dumped == []
 
 
+def test_run_verify_chases_configs_for_dumped_devices(tmp_path, monkeypatch):
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+
+    monkeypatch.setattr(
+        thief, "verify_ccmadmin_login",
+        lambda s, h, p, u, pw, timeout=10: ("valid", 302) if h == "h1" else ("invalid", 200),
+    )
+
+    def fake_dump(host, port, user, pw, db_file, **kw):
+        return ["SEP001122334455", "SEPAABBCCDDEEFF"]
+
+    chased = {}
+
+    def fake_download(host, device_names, db_file, use_tftp=True, no_db=False):
+        chased["args"] = (host, list(device_names), use_tftp)
+        return 1
+
+    thief.run_verify(
+        hosts=["h1", "h2"],
+        pairs=[("admin", "pw")],
+        port=8443,
+        threads=4,
+        db_file=db,
+        use_tftp=False,
+        _dump_fn=fake_dump,
+        _download_fn=fake_download,
+    )
+    assert chased["args"] == ("h1", ["SEP001122334455", "SEPAABBCCDDEEFF"], False)
+
+
+def test_run_verify_skips_config_chase_when_no_devices(tmp_path, monkeypatch):
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    monkeypatch.setattr(
+        thief, "verify_ccmadmin_login", lambda *a, **k: ("valid", 302)
+    )
+
+    called = []
+    thief.run_verify(
+        hosts=["h1"],
+        pairs=[("admin", "pw")],
+        port=8443,
+        threads=4,
+        db_file=db,
+        _dump_fn=lambda *a, **k: [],  # no devices discovered
+        _download_fn=lambda *a, **k: called.append(a) or 0,
+    )
+    assert called == []
+
+
+def test_run_verify_no_chase_when_dump_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    monkeypatch.setattr(
+        thief, "verify_ccmadmin_login", lambda *a, **k: ("valid", 302)
+    )
+
+    called = []
+    thief.run_verify(
+        hosts=["h1"],
+        pairs=[("admin", "pw")],
+        port=8443,
+        threads=4,
+        db_file=db,
+        dump_devices=False,
+        _dump_fn=lambda *a, **k: ["SEP001122334455"],
+        _download_fn=lambda *a, **k: called.append(a) or 0,
+    )
+    assert called == []
+
+
 def test_show_db_lists_admin_devices(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "t.db")
     thief.init_database(db)

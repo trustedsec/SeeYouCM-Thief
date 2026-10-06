@@ -202,11 +202,12 @@ def test_cli_verify_dispatches(tmp_path, monkeypatch):
     thief.init_database(db)
     captured = {}
 
-    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True):
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
         captured["port"] = port
         captured["threads"] = threads
         captured["db_file"] = db_file
         captured["dump_devices"] = dump_devices
+        captured["use_tftp"] = use_tftp
         return None
 
     monkeypatch.setattr(thief, "run_verify", fake_run_verify)
@@ -215,7 +216,27 @@ def test_cli_verify_dispatches(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         thief.main()
     assert ei.value.code == 0
-    assert captured == {"port": 443, "threads": 3, "db_file": db, "dump_devices": True}
+    # TFTP is the default transport for the config chase.
+    assert captured == {"port": 443, "threads": 3, "db_file": db,
+                        "dump_devices": True, "use_tftp": True}
+
+
+def test_cli_verify_http_flag_flips_transport(tmp_path, monkeypatch):
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    captured = {}
+
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
+        captured["use_tftp"] = use_tftp
+        return None
+
+    monkeypatch.setattr(thief, "run_verify", fake_run_verify)
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--db", db, "--http"])
+    with pytest.raises(SystemExit) as ei:
+        thief.main()
+    assert ei.value.code == 0
+    # --http flips the config chase to HTTP; guards against a not-args.http inversion.
+    assert captured["use_tftp"] is False
 
 
 def test_cli_verify_no_device_dump_flag(tmp_path, monkeypatch):
@@ -223,7 +244,7 @@ def test_cli_verify_no_device_dump_flag(tmp_path, monkeypatch):
     thief.init_database(db)
     captured = {}
 
-    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True):
+    def fake_run_verify(hosts, pairs, port, threads, db_file, dump_devices=True, use_tftp=True):
         captured["dump_devices"] = dump_devices
         return None
 
