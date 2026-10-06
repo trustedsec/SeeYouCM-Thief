@@ -422,6 +422,60 @@ def test_run_verify_no_chase_when_dump_disabled(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_get_valid_admin_logins_filters_and_dedupes(tmp_path):
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    thief.log_verification_attempt("h1", "admin", "pw1", "valid", 302, None, db)
+    thief.log_verification_attempt("h1", "root", "pw2", "valid", 302, None, db)   # later -> wins
+    thief.log_verification_attempt("h2", "op", "pwX", "invalid", 200, None, db)   # not valid
+    thief.log_verification_attempt("h3", "svc", "pw3", "valid", 302, None, db)    # out of scope
+    got = thief.get_valid_admin_logins(db, hosts=["h1", "h2"])
+    assert got == {"h1": ("root", "pw2")}
+
+
+def test_run_verify_dumps_for_previously_valid_hosts_when_nothing_new(tmp_path, monkeypatch):
+    # A prior run already verified h1 valid, so nothing is queued this run; the
+    # dump + config chase must still fire for h1 from the DB-seeded valid logins.
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    thief.log_verification_attempt("h1", "admin", "pw", "valid", 302, None, db)
+
+    monkeypatch.setattr(thief, "verify_ccmadmin_login",
+                        lambda *a, **k: pytest.fail("should not re-verify when nothing is queued"))
+
+    dumped, chased = [], []
+    thief.run_verify(
+        hosts=["h1"], pairs=[("admin", "pw")], port=8443, threads=4, db_file=db,
+        _dump_fn=lambda host, port, u, pw, dbf, **k: (dumped.append(host), ["SEP001122334455"])[1],
+        _download_fn=lambda host, names, dbf, **k: chased.append((host, list(names))) or 1,
+    )
+    assert dumped == ["h1"]
+    assert chased == [("h1", ["SEP001122334455"])]
+
+
+def test_run_verify_force_requeues_already_verified(tmp_path, monkeypatch):
+    # --force must bypass the verification cache and re-attempt an already-valid pair.
+    monkeypatch.setattr(thief, "_TEST_MODE", False)
+    db = str(tmp_path / "t.db")
+    thief.init_database(db)
+    thief.log_verification_attempt("h1", "admin", "pw", "valid", 302, None, db)
+
+    attempts = []
+
+    def fake_login(session, host, port, user, pw, timeout=10):
+        attempts.append((host, user, pw))
+        return ("valid", 302)
+
+    monkeypatch.setattr(thief, "verify_ccmadmin_login", fake_login)
+
+    thief.run_verify(
+        hosts=["h1"], pairs=[("admin", "pw")], port=8443, threads=4, db_file=db,
+        force=True, dump_devices=False,
+    )
+    assert ("h1", "admin", "pw") in attempts
+
+
 def test_show_db_lists_admin_devices(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "t.db")
     thief.init_database(db)

