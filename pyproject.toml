@@ -27,4 +27,21 @@ version_scheme = "guess-next-dev"
 [dependency-groups]
 dev = [
     "pytest==9.0.3",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.coverage.run]
+source = ["src/seeyoucm_thief"]
+branch = true
+omit = ["src/seeyoucm_thief/_version.py"]
+
+[tool.coverage.report]
+# Baseline when coverage was added (Oct 2026) was 60%; floor set 5 points
+# below so normal churn doesn't break CI but a real regression does. Raise
+# this as coverage grows.
+fail_under = 55
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "def banner",
 ]

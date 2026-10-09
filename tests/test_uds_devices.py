@@ -275,6 +275,50 @@ def test_download_uds_discovered_configs_no_db_skips_credential_logging(db_path,
     assert logged == []        # but never touches the DB
 
 
+def test_download_uds_discovered_configs_processes_all_in_parallel(db_path, monkeypatch):
+    # Prove the downloads actually overlap: each fetch waits on a barrier that
+    # only releases once `threads` of them have entered concurrently. If the
+    # loop were sequential the barrier would never fill and this would time out.
+    import threading as _t
+    n = 5
+    barrier = _t.Barrier(n, timeout=5)
+    seen = set()
+    seen_lock = _t.Lock()
+
+    def fake_search(host, filename, use_tftp=True):
+        barrier.wait()  # blocks until n concurrent callers arrive
+        with seen_lock:
+            seen.add(filename)
+        return ([], [])
+
+    monkeypatch.setattr(thief, 'search_for_secrets', fake_search)
+    names = [f"SEP0011223344{i:02d}" for i in range(n)]
+    thief.download_uds_discovered_configs(
+        "cucm.example.com", names, db_path, threads=n,
+    )
+    assert seen == {f"{name}.cnf.xml" for name in names}
+
+
+def test_download_uds_discovered_configs_caps_workers_at_device_count(db_path, monkeypatch):
+    # threads far exceeds device count: must not spawn more workers than devices,
+    # and every device is still processed exactly once.
+    import threading as _t
+    counts = {}
+    lock = _t.Lock()
+
+    def fake_search(host, filename, use_tftp=True):
+        with lock:
+            counts[filename] = counts.get(filename, 0) + 1
+        return ([], [])
+
+    monkeypatch.setattr(thief, 'search_for_secrets', fake_search)
+    names = ["SEP001122334455", "SEP667788990011"]
+    thief.download_uds_discovered_configs(
+        "cucm.example.com", names, db_path, threads=100,
+    )
+    assert counts == {"SEP001122334455.cnf.xml": 1, "SEP667788990011.cnf.xml": 1}
+
+
 # ---------------------------------------------------------------------------
 # _iter_uds_user_pages (shared pagination)
 # ---------------------------------------------------------------------------
