@@ -67,6 +67,22 @@ class TestGetServersApi:
         monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp('<servers></servers>'))
         assert thief.get_servers_api('cucm1') == []
 
+    def test_uses_secure_port_when_specified(self, monkeypatch):
+        calls = []
+        def capture_call(*args, **kwargs):
+            calls.append((args, kwargs))
+            return _resp(SERVERS_XML)
+        monkeypatch.setattr(thief.requests, 'get', capture_call)
+        servers = thief.get_servers_api('cucm.test', port=thief.UDS_PORT_SECURE)
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args[0] == f'https://cucm.test:{thief.UDS_PORT_SECURE}/cucm-uds/servers'
+        assert kwargs.get('verify') is False
+        assert servers == [
+            {'hostName': 'cucm-pub.example.com', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'},
+            {'hostName': 'cucm-sub1.example.com', 'ipv4Address': '10.0.0.2', 'serverType': 'Subscriber'},
+        ]
+
 
 class TestLogClusterServersToDb:
     def test_inserts_servers_with_any_identifying_field(self, db_path):
