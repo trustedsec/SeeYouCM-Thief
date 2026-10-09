@@ -11,3 +11,5 @@ dist/
 *.egg-info/
 src/seeyoucm_thief/_version.py
 build/
+.coverage
+coverage.xml
