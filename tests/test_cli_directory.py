@@ -4,6 +4,10 @@ import pathlib
 import sqlite3
 import subprocess
 
+import pytest
+
+pytestmark = pytest.mark.e2e
+
 _THIEF = str(pathlib.Path(__file__).resolve().parent.parent / "thief.py")
 
 

@@ -4,6 +4,8 @@ import pytest
 
 import thief
 
+pytestmark = pytest.mark.e2e
+
 
 def _db(tmp_path):
     db_file = str(tmp_path / 'thief.db')

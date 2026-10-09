@@ -8,6 +8,8 @@ import pytest
 
 import thief
 
+pytestmark = pytest.mark.e2e
+
 
 def _make_db_with_rows(db_path, rows):
     """Create a thief-schema DB at db_path and insert the given rows.

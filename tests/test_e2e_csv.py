@@ -2,7 +2,11 @@ import csv
 import os
 import subprocess
 
+import pytest
+
 from seeyoucm_thief import thief
+
+pytestmark = pytest.mark.e2e
 
 
 def test_end_to_end_csv_export(tmp_path):

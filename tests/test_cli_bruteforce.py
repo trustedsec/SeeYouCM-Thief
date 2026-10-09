@@ -1,6 +1,10 @@
 import os
 import subprocess
 
+import pytest
+
+pytestmark = pytest.mark.e2e
+
 
 def test_bruteforce_requires_phone():
     env = os.environ.copy()
