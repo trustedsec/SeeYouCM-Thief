@@ -116,3 +116,9 @@ class TestExportToCsv:
             raise PermissionError("denied")
         monkeypatch.setattr('builtins.open', raise_permission_error)
         assert thief.export_to_csv([], [], str(tmp_path / 'out.csv')) is False
+
+    def test_returns_false_on_ioerror(self, tmp_path, monkeypatch):
+        def raise_ioerror(*a, **kw):
+            raise IOError("disk full")
+        monkeypatch.setattr('builtins.open', raise_ioerror)
+        assert thief.export_to_csv([], [], str(tmp_path / 'out.csv')) is False
