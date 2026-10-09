@@ -13,20 +13,6 @@ import requests
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    """Return a path to a freshly-initialized thief.db in tmp_path."""
-    p = tmp_path / "thief.db"
-    thief.init_database(str(p))
-    return str(p)
-
-
 def _table_columns(db_path, table):
     conn = sqlite3.connect(db_path)
     try:

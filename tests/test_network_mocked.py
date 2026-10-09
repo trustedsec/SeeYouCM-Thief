@@ -55,12 +55,6 @@ PHONE_NETWORK_PAGE_NO_HOSTNAME = """
 """
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
 # ---------------------------------------------------------------------------
 # download_config_http
 # ---------------------------------------------------------------------------
