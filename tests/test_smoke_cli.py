@@ -29,9 +29,9 @@ def _argv(monkeypatch, *args):
 # ---------------------------------------------------------------------------
 
 class TestServersDispatch:
-    def test_requires_host(self, monkeypatch, capsys):
+    def test_requires_host(self, monkeypatch, tmp_path, capsys):
         _set_test_mode(monkeypatch)
-        _argv(monkeypatch, '--servers')
+        _argv(monkeypatch, '--servers', '--db', str(tmp_path / 'thief.db'))
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1
@@ -159,36 +159,28 @@ class TestNoTargetAndValidation:
         out = capsys.readouterr().out
         assert 'You must enter either a phone IP address or the IP address of the CUCM server' in out
 
-    def test_directory_requires_host_in_process(self, monkeypatch, capsys):
+    def test_directory_requires_host_in_process(self, monkeypatch, tmp_path, capsys):
         _set_test_mode(monkeypatch)
-        _argv(monkeypatch, '--directory')
+        _argv(monkeypatch, '--directory', '--db', str(tmp_path / 'thief.db'))
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1
         assert '--directory requires' in capsys.readouterr().out
 
-    def test_userenum_requires_host_in_process(self, monkeypatch, capsys):
+    def test_verify_requires_db(self, monkeypatch, tmp_path, capsys):
         _set_test_mode(monkeypatch)
-        _argv(monkeypatch, '--userenum')
-        with pytest.raises(SystemExit) as exc:
-            thief.main()
-        assert exc.value.code == 1
-        assert '--userenum requires' in capsys.readouterr().out
-
-    def test_verify_requires_db(self, monkeypatch, capsys):
-        _set_test_mode(monkeypatch)
-        _argv(monkeypatch, '-H', 'cucm1', '--verify', '--no-db')
+        _argv(monkeypatch, '-H', 'cucm1', '--verify', '--db', str(tmp_path / 'thief.db'), '--no-db')
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1
         assert 'cannot be used with --no-db' in capsys.readouterr().out
 
-    def test_phone_negative_threads_rejected(self, monkeypatch, capsys):
+    def test_phone_negative_threads_rejected(self, monkeypatch, tmp_path, capsys):
         # threads=0 is falsy, so `num_workers = ... if threads else 1` masks
         # it back to 1 -- only a negative thread count actually reaches the
         # num_workers < 1 validation branch.
         _set_test_mode(monkeypatch)
-        _argv(monkeypatch, '-p', '1.2.3.4', '--threads', '-1')
+        _argv(monkeypatch, '-p', '1.2.3.4', '--threads', '-1', '--db', str(tmp_path / 'thief.db'))
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1
@@ -308,8 +300,8 @@ class TestExtractConfigsDispatch:
 # ---------------------------------------------------------------------------
 
 class TestUserenumDispatch:
-    def test_requires_host(self, monkeypatch, capsys):
-        _argv(monkeypatch, '--userenum')
+    def test_requires_host(self, monkeypatch, tmp_path, capsys):
+        _argv(monkeypatch, '--userenum', '--db', str(tmp_path / 'thief.db'))
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1

@@ -4,8 +4,6 @@ import pytest
 
 import thief
 
-pytestmark = pytest.mark.e2e
-
 
 def _db(tmp_path):
     db_file = str(tmp_path / 'thief.db')
@@ -36,6 +34,7 @@ def test_uds_device_macs_missing_table(tmp_path):
     assert thief.get_uds_device_macs_from_db('cucm1', db_file) == []
 
 
+@pytest.mark.e2e
 def test_brute_mac_accepts_host_without_phone(tmp_path):
     import os
     import subprocess

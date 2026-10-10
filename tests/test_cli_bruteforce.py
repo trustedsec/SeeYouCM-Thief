@@ -6,11 +6,11 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 
-def test_bruteforce_requires_phone():
+def test_bruteforce_requires_phone(tmp_path):
     env = os.environ.copy()
     env["PYTEST_CURRENT_TEST"] = "1"
     result = subprocess.run(
-        ["python3", "thief.py", "--brute-mac"],
+        ["python3", "thief.py", "--brute-mac", "--db", str(tmp_path / "thief.db")],
         capture_output=True,
         text=True,
         env=env,

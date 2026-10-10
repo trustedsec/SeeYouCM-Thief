@@ -2,7 +2,6 @@
 import sqlite3
 from unittest.mock import MagicMock, patch
 
-import pytest
 import requests
 
 from seeyoucm_thief import thief

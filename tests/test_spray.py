@@ -480,8 +480,8 @@ def test_run_spray_skips_probe_when_disabled(monkeypatch, db_path):
     assert probe_called["n"] == 0
 
 
-def test_cli_requires_password_when_spray(monkeypatch, capsys):
-    monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray'])
+def test_cli_requires_password_when_spray(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray', '--db', str(tmp_path / 'thief.db')])
     with pytest.raises(SystemExit):
         thief.main()
     captured = capsys.readouterr()
@@ -493,15 +493,15 @@ def test_cli_rejects_both_password_and_passwords_file(monkeypatch, tmp_path, cap
     pw.write_text("x\n")
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray',
-        '--spray-password', 'a', '-P', str(pw),
+        '--spray-password', 'a', '-P', str(pw), '--db', str(tmp_path / 'thief.db'),
     ])
     with pytest.raises(SystemExit):
         thief.main()
 
 
-def test_cli_rejects_spray_with_brute_mac(monkeypatch, capsys):
+def test_cli_rejects_spray_with_brute_mac(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr('sys.argv', [
-        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac',
+        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac', '--db', str(tmp_path / 'thief.db'),
     ])
     with pytest.raises(SystemExit):
         thief.main()

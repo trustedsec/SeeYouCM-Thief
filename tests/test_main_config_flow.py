@@ -99,8 +99,8 @@ def test_phone_with_no_config_names(leaves, monkeypatch, tmp_path, capsys):
     assert 'Unable to detect file names from CUCM' in capsys.readouterr().out
 
 
-def test_no_phone_no_host_exits_1(monkeypatch, capsys):
-    _argv(monkeypatch)
+def test_no_phone_no_host_exits_1(monkeypatch, tmp_path, capsys):
+    _argv(monkeypatch, '--db', str(tmp_path / 'thief.db'))
     with pytest.raises(SystemExit) as exc:
         thief.main()
     assert exc.value.code == 1
