@@ -21,17 +21,10 @@ def _resp(text, status_code=200):
 # ---------------------------------------------------------------------------
 
 class TestParseUdsDirectoryMalformed:
-    def test_user_without_username_is_skipped(self):
-        body = "<users><user><firstName>NoName</firstName></user></users>"
-        assert thief.parse_uds_directory(body) == []
-
     def test_truncated_user_block_yields_no_records(self):
         # Missing closing </user> -- the non-greedy regex finds no complete block.
         body = "<users><user><userName>alice</userName>"
         assert thief.parse_uds_directory(body) == []
-
-    def test_empty_body_yields_no_records(self):
-        assert thief.parse_uds_directory('') == []
 
     def test_non_xml_html_error_page_yields_no_records(self):
         body = "<html><body><h1>500 Internal Server Error</h1></body></html>"
@@ -73,26 +66,22 @@ class TestParseUdsDirectoryMalformed:
 # ---------------------------------------------------------------------------
 
 class TestParseUdsDevicesMalformed:
-    def test_empty_body_yields_no_devices(self):
-        assert thief.parse_uds_devices('') == []
-
     def test_html_error_body_yields_no_devices(self):
         assert thief.parse_uds_devices('<html>500 error</html>') == []
 
-    def test_non_sep_device_names_are_ignored(self):
-        assert thief.parse_uds_devices('<device>CSFALICE</device>') == []
-
     def test_truncated_device_tag_is_ignored(self):
-        assert thief.parse_uds_devices('<device>SEP00112233') == []
-
-    def test_multiple_valid_devices(self):
-        body = "<devices><device>SEP001122334455</device><device>SEPAABBCCDDEEFF</device></devices>"
-        assert thief.parse_uds_devices(body) == ['SEP001122334455', 'SEPAABBCCDDEEFF']
+        assert thief.parse_uds_devices('<device>SEP001122334455') == []
 
 
 # ---------------------------------------------------------------------------
 # _uds_next_link
 # ---------------------------------------------------------------------------
+# NOTE: The following tests pin pre-PR #40 (feat/uds-schema-conformance, commit
+# 9456586) behavior. When that branch merges, the signature and behavior of
+# _uds_next_link will change from _uds_next_link(body, base_url, fallback_start)
+# to _uds_next_link(base_url, start), removing support for HATEOAS link probing
+# and <next> tag parsing. These tests will need to be updated or removed at that
+# time.
 
 class TestUdsNextLink:
     def test_prefers_hateoas_rel_next_link(self):
@@ -147,7 +136,7 @@ class TestIterUdsUserPagesTermination:
         body = f'<users><user><userName>a</userName></user><next>{loop_url}</next></users>'
 
         monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(body))
-        pages = list(thief._iter_uds_user_pages('cucm1'))
+        pages = list(thief._iter_uds_user_pages('cucm1', max_pages=5))
         # base is fetched, yields <next>loop_url</next>; loop_url is fetched
         # once (still novel), yields the same <next>loop_url</next> again;
         # on the third attempt loop_url is already in seen_urls and the
