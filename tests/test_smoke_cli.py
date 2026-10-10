@@ -3,11 +3,10 @@ function and exit with the right code? Previously this layer did not exist
 at all -- coverage was either pure-unit (mocked single functions) or full
 subprocess e2e. These run thief.main() in-process with sys.argv patched.
 
-_TEST_MODE is forced True in each test (regardless of the conftest autouse
-default) since most of these dispatch paths call functions that have fast,
-deterministic _TEST_MODE branches, and we don't want to hand-mock every leaf.
+_TEST_MODE is forced True only in tests that call _set_test_mode(), for
+dispatch paths that have fast, deterministic _TEST_MODE branches. Most other
+tests keep _TEST_MODE=False (conftest default) and mock leaf functions instead.
 """
-import os
 import sqlite3
 
 import pytest
@@ -84,6 +83,9 @@ class TestGowitnessDispatch:
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 0
+        # Prove the seeded phone was loaded and processed
+        out = capsys.readouterr().out
+        assert '10.0.0.5' in out
 
 
 # ---------------------------------------------------------------------------
@@ -116,19 +118,31 @@ class TestEnumsubnetDispatch:
 # ---------------------------------------------------------------------------
 
 class TestPhoneDispatch:
-    def test_single_phone_writes_credentials_to_db(self, monkeypatch, tmp_path, capsys):
-        _set_test_mode(monkeypatch)
+    def test_single_phone_writes_credentials_to_db(self, monkeypatch, tmp_path):
+        # Do NOT force _TEST_MODE. Test the actual phone download path.
         db = tmp_path / 'thief.db'
-        _argv(monkeypatch, '-H', 'mock-cucm', '-p', '1.2.3.4', '--db', str(db), '--threads', '1')
+        # Mock phone discovery and config retrieval functions
+        monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda *a, **kw: 'cucm.test')
+        monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda *a, **kw: 'SEP001122334455')
+        monkeypatch.setattr(thief, 'get_phones_hostnames_from_reverse', lambda *a, **kw: [])
+        monkeypatch.setattr(thief, 'get_config_names', lambda *a, **kw: ['SEP001122334455.cnf.xml'])
+        # Mock search_for_secrets to return phone-specific credentials
+        # Return format: (credentials_list, usernames_list) where each cred is (user, pass, filename)
+        monkeypatch.setattr(thief, 'search_for_secrets',
+                             lambda *a, **kw: ([('phoneuser', 'phonepw', 'SEP001122334455.cnf.xml')], []))
+        _argv(monkeypatch, '-H', 'mock-cucm', '-p', '10.0.0.5', '--db', str(db), '-T', '1')
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 0
 
+        # Verify that phoneuser was written (proves the phone path ran)
         conn = sqlite3.connect(db)
-        rows = conn.execute("SELECT username, password FROM credentials").fetchall()
+        cred_rows = conn.execute("SELECT username, password FROM credentials").fetchall()
+        phone_cucm_rows = conn.execute("SELECT * FROM phone_cucm WHERE phone_ip = ?", ('10.0.0.5',)).fetchall()
         conn.close()
-        usernames = [r[0] for r in rows]
-        assert 'admin' in usernames
+        usernames = [r[0] for r in cred_rows]
+        assert 'phoneuser' in usernames
+        assert len(phone_cucm_rows) > 0  # phone_cucm row must exist for 10.0.0.5
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +157,8 @@ class TestNoTargetAndValidation:
         with pytest.raises(SystemExit) as exc:
             thief.main()
         assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert 'You must enter either a phone IP address or the IP address of the CUCM server' in out
 
     def test_directory_requires_host_in_process(self, monkeypatch, capsys):
         _set_test_mode(monkeypatch)
@@ -303,8 +319,8 @@ class TestUserenumDispatch:
     def test_writes_users_and_logs_to_db(self, monkeypatch, tmp_path, capsys):
         db = str(tmp_path / 'thief.db')
         outfile = tmp_path / 'users.txt'
-        monkeypatch.setattr(thief, 'get_users_api', lambda host, port=None: ['alice', 'bob', 'alice'])
-        monkeypatch.setattr(thief, 'get_user_directory_api', lambda host, port=None: [])
+        monkeypatch.setattr(thief, 'get_users_api', lambda host, port=None, **kw: ['alice', 'bob', 'alice'])
+        monkeypatch.setattr(thief, 'get_user_directory_api', lambda host, port=None, **kw: [])
         monkeypatch.setattr(thief, 'enumerate_devices_unauthenticated', lambda *a, **kw: 0)
         _argv(monkeypatch, '-H', 'cucm.test', '--userenum', '--db', db, '--outfile', str(outfile))
         with pytest.raises(SystemExit) as exc:
