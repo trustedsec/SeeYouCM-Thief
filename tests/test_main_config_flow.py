@@ -104,3 +104,22 @@ def test_no_phone_no_host_exits_1(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         thief.main()
     assert exc.value.code == 1
+
+
+def test_enumsubnet_prints_and_logs_found_credentials(leaves, monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / 'thief.db')
+    monkeypatch.setattr(
+        thief, 'enumerate_phones_subnet',
+        lambda cidr: [{'ip': '10.0.0.5', 'hostname': 'SEP001122334455',
+                       'url': 'http://cucm.test:6970/SEP001122334455.cnf.xml'}],
+    )
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda h: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--db', db)
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert 'Credentials Found in Configurations!' in out
+    assert 'admin\tpw\tSEP001122334455.cnf.xml' in out
+    assert 'Usernames Found in Configurations!' in out
+    assert _count(db, 'credentials') == 1

@@ -4066,7 +4066,9 @@ def main():
                     file_names = []
                 for file in file_names:
                     print(f'Connecting to {CUCM_host} and getting config for {host["ip"]}/{host["hostname"]}')
-                    search_for_secrets(CUCM_host, file, use_tftp)
+                    creds, users = search_for_secrets(CUCM_host, file, use_tftp)
+                    found_credentials.extend(creds)
+                    found_usernames.extend(users)
                 if found_credentials != []:
                     print('Credentials Found in Configurations!')
                 for cred in found_credentials:
@@ -4075,6 +4077,8 @@ def main():
                     print('Usernames Found in Configurations!')
                 for usernames in found_usernames:
                     print('{0}\t{1}'.format(usernames[0],usernames[1]))
+                if not no_db and (found_credentials or found_usernames):
+                    log_credentials_to_db(CUCM_host, found_credentials, found_usernames, db_file)
             print("\n")
         quit(0)
     elif phones:

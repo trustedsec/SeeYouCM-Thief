@@ -93,7 +93,6 @@ class TestGowitnessDispatch:
 # ---------------------------------------------------------------------------
 
 class TestEnumsubnetDispatch:
-    @pytest.mark.xfail(strict=True, reason='enumsubnet discards search_for_secrets results; fixed in Task 8')
     def test_reports_credentials_found_on_subnet(self, monkeypatch, tmp_path, capsys):
         _set_test_mode(monkeypatch)
         db = tmp_path / 'thief.db'
