@@ -213,6 +213,7 @@ class TestExtractConfigsDebugLogging:
 
 
 class TestExtractConfigsCli:
+    @pytest.mark.e2e
     def test_cli_extracts_files(self, tmp_path):
         db_path = tmp_path / 'thief.db'
         out_dir = tmp_path / 'configs'
@@ -236,6 +237,7 @@ class TestExtractConfigsCli:
         assert (out_dir / '10.0.1.6' / 'CLI2.cnf.xml').read_text() == '<xml>cli-2</xml>'
         assert 'Done: 2 written' in result.stdout
 
+    @pytest.mark.e2e
     def test_cli_rejects_no_db_combo(self, tmp_path):
         out_dir = tmp_path / 'configs'
 
@@ -252,6 +254,7 @@ class TestExtractConfigsCli:
         assert '--no-db' in combined or 'no-db' in combined
         assert not out_dir.exists()
 
+    @pytest.mark.e2e
     def test_cli_missing_db_exits_nonzero(self, tmp_path):
         out_dir = tmp_path / 'configs'
         missing_db = tmp_path / 'nope.db'

@@ -4,6 +4,10 @@ import pathlib
 import sqlite3
 import subprocess
 
+import pytest
+
+pytestmark = pytest.mark.e2e
+
 _THIEF = str(pathlib.Path(__file__).resolve().parent.parent / "thief.py")
 
 
@@ -13,9 +17,9 @@ def _env():
     return env
 
 
-def test_directory_requires_host():
+def test_directory_requires_host(tmp_path):
     result = subprocess.run(
-        ["python3", _THIEF, "--directory"],
+        ["python3", _THIEF, "--directory", "--db", str(tmp_path / "thief.db")],
         capture_output=True, text=True, env=_env(),
     )
     assert result.returncode == 1
@@ -55,7 +59,7 @@ def test_directory_no_db_still_writes_csv(tmp_path):
     out_csv = tmp_path / "dir.csv"
     result = subprocess.run(
         ["python3", _THIEF, "--directory", "-H", "mock-cucm",
-         "--directory-outfile", str(out_csv), "--no-db"],
+         "--directory-outfile", str(out_csv), "--db", str(tmp_path / "thief.db"), "--no-db"],
         capture_output=True, text=True, env=_env(),
     )
     assert result.returncode == 0, result.stdout + result.stderr

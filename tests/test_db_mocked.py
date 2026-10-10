@@ -4,6 +4,8 @@ import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
+pytestmark = pytest.mark.e2e
+
 TEST_DB = 'test_pytest.db'
 MOCK_CONFIG = '''<device>\n<sshUserId>admin</sshUserId>\n<sshPassword>pass123</sshPassword>\n<userId>user</userId>\n<adminPassword>secret</adminPassword>\n</device>'''
 
