@@ -36,10 +36,10 @@ branch = true
 omit = ["src/seeyoucm_thief/_version.py"]
 
 [tool.coverage.report]
-# Baseline when coverage was added (Oct 2026) was 60%; floor set 5 points
+# Baseline after the Oct 2026 coverage push was 78.48%; floor set 5 points
 # below so normal churn doesn't break CI but a real regression does. Raise
 # this as coverage grows.
-fail_under = 55
+fail_under = 73
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
