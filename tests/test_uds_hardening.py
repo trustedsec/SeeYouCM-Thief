@@ -7,11 +7,6 @@ import pytest
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
 def _version_xml(auth=None):
     body = "<version><version>14.0.1</version><prefix>14.0(1)</prefix>"
     if auth is not None:

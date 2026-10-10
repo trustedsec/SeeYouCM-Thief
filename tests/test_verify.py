@@ -275,15 +275,15 @@ def test_cli_verify_no_device_dump_flag(tmp_path, monkeypatch):
     assert captured["dump_devices"] is False
 
 
-def test_cli_verify_rejects_no_db(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--no-db"])
+def test_cli_verify_rejects_no_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--db", str(tmp_path / "thief.db"), "--no-db"])
     with pytest.raises(SystemExit) as ei:
         thief.main()
     assert ei.value.code == 1
 
 
-def test_cli_verify_mutually_exclusive_with_spray(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--spray", "-H", "h"])
+def test_cli_verify_mutually_exclusive_with_spray(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["thief", "--verify", "--spray", "-H", "h", "--db", str(tmp_path / "thief.db")])
     with pytest.raises(SystemExit) as ei:
         thief.main()
     assert ei.value.code == 1
