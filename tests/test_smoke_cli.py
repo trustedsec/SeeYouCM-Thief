@@ -45,13 +45,14 @@ class TestServersDispatch:
             thief.main()
         assert exc.value.code == 0
         out = capsys.readouterr().out
-        assert 'Discovered 1 cluster member' in out
+        assert 'Discovered 2 cluster member' in out
         assert 'cucm-pub.test' in out
+        assert 'cucm-sub1.test' in out
 
         conn = sqlite3.connect(db)
         count = conn.execute("SELECT COUNT(*) FROM cluster_servers").fetchone()[0]
         conn.close()
-        assert count == 1
+        assert count == 2
 
 
 # ---------------------------------------------------------------------------

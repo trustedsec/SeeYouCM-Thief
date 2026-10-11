@@ -9,20 +9,11 @@ from seeyoucm_thief import thief
 
 
 SERVERS_XML = """<servers>
-<server uri="/cucm-uds/servers/1">
-<hostName>cucm-pub.example.com</hostName>
-<ipv4Address>10.0.0.1</ipv4Address>
-<ipv6Address></ipv6Address>
-<serverType>Publisher</serverType>
-</server>
-<server uri="/cucm-uds/servers/2">
-<hostName>cucm-sub1.example.com</hostName>
-<ipv4Address>10.0.0.2</ipv4Address>
-<serverType>Subscriber</serverType>
-</server>
+<server>cucm-pub.example.com</server>
+<server>cucm-sub1.example.com</server>
 </servers>"""
 
-SERVERS_XML_15X_PLAINTEXT = """<servers>
+SERVERS_XML_WITH_URI_ATTR = """<servers>
 <server uri="/cucm-uds/servers/1">cucm-pub.example.com</server>
 <server uri="/cucm-uds/servers/2">cucm-sub1.example.com</server>
 </servers>"""
@@ -41,12 +32,12 @@ class TestGetServersApi:
         monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(SERVERS_XML))
         servers = thief.get_servers_api('cucm1')
         assert servers == [
-            {'hostName': 'cucm-pub.example.com', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'},
-            {'hostName': 'cucm-sub1.example.com', 'ipv4Address': '10.0.0.2', 'serverType': 'Subscriber'},
+            {'hostName': 'cucm-pub.example.com'},
+            {'hostName': 'cucm-sub1.example.com'},
         ]
 
-    def test_falls_back_to_plaintext_for_15x_servers(self, monkeypatch):
-        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(SERVERS_XML_15X_PLAINTEXT))
+    def test_tolerates_uri_attribute_on_server_element(self, monkeypatch):
+        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(SERVERS_XML_WITH_URI_ATTR))
         servers = thief.get_servers_api('cucm1')
         assert servers == [
             {'hostName': 'cucm-pub.example.com'},
@@ -79,12 +70,16 @@ class TestGetServersApi:
         assert args[0] == f'https://cucm.test:{thief.UDS_PORT_SECURE}/cucm-uds/servers'
         assert kwargs.get('verify') is False
         assert servers == [
-            {'hostName': 'cucm-pub.example.com', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'},
-            {'hostName': 'cucm-sub1.example.com', 'ipv4Address': '10.0.0.2', 'serverType': 'Subscriber'},
+            {'hostName': 'cucm-pub.example.com'},
+            {'hostName': 'cucm-sub1.example.com'},
         ]
 
 
 class TestLogClusterServersToDb:
+    # Note: ipv4Address, ipv6Address, and serverType no longer come from get_servers_api
+    # (which returns only hostName per v14 schema). These fields are kept in the DB schema
+    # for DNS/AXL enrichment from other sources and compatibility with existing databases.
+
     def test_inserts_servers_with_any_identifying_field(self, db_path):
         servers = [
             {'hostName': 'cucm-pub.example.com', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'},
