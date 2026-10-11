@@ -7,11 +7,6 @@ import pytest
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
 def _version_xml(auth=None):
     """Shaped per the official v14 version.get.xsd: a <versionInformation>
     wrapper whose version= attribute is the UDS schema version, a <version>

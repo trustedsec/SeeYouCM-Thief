@@ -27,6 +27,7 @@ PHONE_NETWORK_PAGE = """
 <html><body>
 <td>Host name SEP001122334455</td>
 <tr>
+<td>CUCM Server</td>
 <td>cucm1.example.com Active</td>
 </tr>
 </body></html>
@@ -52,12 +53,6 @@ PHONE_NETWORK_PAGE_NO_HOSTNAME = """
 <td><b>UNKNOWN-DEVICE</b></td>
 </body></html>
 """
-
-
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
 
 
 # ---------------------------------------------------------------------------

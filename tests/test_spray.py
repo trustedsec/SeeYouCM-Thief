@@ -13,20 +13,6 @@ import requests
 from seeyoucm_thief import thief
 
 
-@pytest.fixture(autouse=True)
-def _disable_test_mode(monkeypatch):
-    """Ensure _TEST_MODE is False so the real code paths execute."""
-    monkeypatch.setattr(thief, '_TEST_MODE', False)
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    """Return a path to a freshly-initialized thief.db in tmp_path."""
-    p = tmp_path / "thief.db"
-    thief.init_database(str(p))
-    return str(p)
-
-
 def _table_columns(db_path, table):
     conn = sqlite3.connect(db_path)
     try:
@@ -494,8 +480,8 @@ def test_run_spray_skips_probe_when_disabled(monkeypatch, db_path):
     assert probe_called["n"] == 0
 
 
-def test_cli_requires_password_when_spray(monkeypatch, capsys):
-    monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray'])
+def test_cli_requires_password_when_spray(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr('sys.argv', ['thief', '-H', '1.2.3.4', '--spray', '--db', str(tmp_path / 'thief.db')])
     with pytest.raises(SystemExit):
         thief.main()
     captured = capsys.readouterr()
@@ -507,15 +493,15 @@ def test_cli_rejects_both_password_and_passwords_file(monkeypatch, tmp_path, cap
     pw.write_text("x\n")
     monkeypatch.setattr('sys.argv', [
         'thief', '-H', '1.2.3.4', '--spray',
-        '--spray-password', 'a', '-P', str(pw),
+        '--spray-password', 'a', '-P', str(pw), '--db', str(tmp_path / 'thief.db'),
     ])
     with pytest.raises(SystemExit):
         thief.main()
 
 
-def test_cli_rejects_spray_with_brute_mac(monkeypatch, capsys):
+def test_cli_rejects_spray_with_brute_mac(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr('sys.argv', [
-        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac',
+        'thief', '-H', '1.2.3.4', '--spray', '--spray-password', 'a', '--brute-mac', '--db', str(tmp_path / 'thief.db'),
     ])
     with pytest.raises(SystemExit):
         thief.main()

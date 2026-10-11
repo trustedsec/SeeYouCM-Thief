@@ -17,6 +17,7 @@ Multi-threaded tool to automatically download and parse configuration files from
 - **User enumeration**: Extract usernames via CUCM User Data Services (UDS) API
 - **Password spray**: HTTP Basic Auth spray against the UDS user endpoint with persistent per-username rate limiting and a pre-flight oracle probe
 - **Credential verification**: replay harvested credential pairs against the CUCM CCMAdmin portal, with a full audit trail of timestamped attempts
+- **Admin device dump**: after a valid CCMAdmin login, pull the full SEP device inventory via AXL (falling back to a CCMAdmin scrape) and download every device config directly — no MAC brute forcing required
 
 ## Usage
 
@@ -127,11 +128,25 @@ Take the credential pairs already harvested into the database and test them agai
 ./thief.py --verify                     # every stored pair vs every known host
 ./thief.py --verify -H <CUCM Server>    # restrict to a single host
 ./thief.py --verify --verify-port 443   # CCMAdmin on 443 instead of the 8443 default
+./thief.py --verify --no-device-dump    # stop after the logins; skip the device dump
 ```
 
 `--verify` reads every `credentials` row that has both a username and a password, dedupes to distinct pairs, and attempts a CCMAdmin form login (Tomcat `j_security_check`) for the **cross-product** of those pairs against every CUCM host known to the database (the union of harvested credential hosts, phone→CUCM mappings, and discovered cluster members). Pass `-H/--host` to narrow the host set to one target.
 
-Every attempt — valid, invalid, or error — is written with a timestamp to the `verification_attempts` table for auditing. A `(host, username, password)` combination that already has a definitive result (`valid`/`invalid`) is skipped on later runs; `error` results (network failures, unexpected responses) are retried. Confirmed admin logins print live (`[+] VALID admin: user@host`) and surface in `--show-db` under "Verified Admin Credentials". Tune concurrency with `--verify-threads` (default: 10).
+Every attempt — valid, invalid, or error — is written with a timestamp to the `verification_attempts` table for auditing. A `(host, username, password)` combination that already has a definitive result (`valid`/`invalid`) is skipped on later runs; `error` results (network failures, unexpected responses) are retried. Pass `--force` to re-check definitive results as well. Confirmed admin logins print live (`[+] VALID admin: user@host`) and surface in `--show-db` under "Verified Admin Credentials". Tune concurrency with `--verify-threads` (default: 10).
+
+#### Device dump and config harvest
+
+Once the logins are done, `--verify` pulls the SEP device inventory from every host that has a valid admin login — including hosts proven valid on an *earlier* run, since the valid pairs are re-read from `verification_attempts`. A re-run therefore still dumps devices and chases configs instead of doing nothing when every pair is already verified.
+
+Two enumeration paths are tried per host, in order:
+
+1. **AXL** — a `listPhone` SOAP request (schema version 14.0) for names matching `SEP%`. Requires the account to hold the **Standard AXL API Access** role.
+2. **CCMAdmin scrape** — if AXL answers 401/403/404, returns a SOAP Fault, or is otherwise unusable, the tool logs into CCMAdmin and pages through `phoneFindList.do` (250 rows per page, capped at 40 pages / 10,000 devices), scraping `SEP<MAC>` names out of the HTML.
+
+Device names land in the `admin_devices` table (recording whether the source was `axl` or `ccmadmin`) and show up in `--show-db` under "Admin Devices". Because these are exact device names, the matching `SEP<MAC>.cnf.xml` config is then fetched **directly** — no 4,096-variation MAC brute force — and parsed for credentials, which are stored like any other find. Downloads run in a thread pool sized by `--verify-threads` (capped at the device count), and `--http` applies here as it does elsewhere.
+
+Skip the whole dump with `--no-device-dump` to stop after the login phase.
 
 `--verify` requires the database (incompatible with `--no-db`) and is mutually exclusive with `--brute-mac` and `--spray`. As with the other features, plaintext passwords are stored in `thief.db`, which is created `chmod 0600`.
 
@@ -193,7 +208,8 @@ Export to CSV:
 
 ### Attack Options
 - `-b, --brute-mac`: Brute force MAC variations (4,096 combinations per phone). If no `-p` phones are given, reuses MAC prefixes discovered on a previous scan from the database (unless `--no-db`). With `-H` and no `-p`, prefixes come from that server's `mac_prefixes` rows plus any `SEP…` devices harvested from it by `--userenum`/`--spray`; if the server has none recorded, prefixes discovered elsewhere are retargeted at it
-- `--force`: Bypass cache and force re-download of all configuration files
+- `-T, --threads N`: Worker threads for brute force mode (default: 40)
+- `--force`: Bypass cache and force re-download of all configuration files. With `--verify`, also re-checks credential pairs that already have a definitive `valid`/`invalid` result
 - `--userenum`: Extract usernames via CUCM User Data Services (UDS) API (paginates the full directory) and harvest the full directory records (names incl. nickname, phone/home/mobile/pager numbers, email, directory URI, MS URI, department, title, manager, UUID) into the `uds_directory` table; always writes `cucm_directory.csv` (override with `--directory-outfile`)
 - `--directory`: Harvest the unauthenticated CUCM corporate directory from `/cucm-uds/users` without any device probing or config downloads — requires `-H`; always writes `cucm_directory.csv` (override with `--directory-outfile`), prints a console table, and stores to `uds_directory` unless `--no-db`
 - `--directory-outfile FILENAME`: Override the default CSV output path for `--directory` and `--userenum` (default: `cucm_directory.csv`)
@@ -206,9 +222,10 @@ Export to CSV:
 - `--spray-threads N`: Concurrent spray workers (default: 10)
 - `--spray-rate-limit-hours N`: Per-username rate-limit window in hours (default: 1)
 - `--no-spray-probe`: Skip the pre-flight oracle probe (use only after manual verification)
-- `--verify`: Verify stored credential pairs against each known CUCM CCMAdmin portal (requires the database; mutually exclusive with `--brute-mac` and `--spray`)
+- `--verify`: Verify stored credential pairs against each known CUCM CCMAdmin portal, then dump the SEP device list from any host with valid admin access and download those configs (requires the database; mutually exclusive with `--brute-mac` and `--spray`)
 - `--verify-port PORT`: CCMAdmin HTTPS port for `--verify` (default: 8443; some clusters use 443)
-- `--verify-threads N`: Concurrent verification workers (default: 10)
+- `--verify-threads N`: Concurrent workers for `--verify`, covering both the login attempts and the follow-on device config downloads (default: 10)
+- `--no-device-dump`: With `--verify`, skip pulling the SEP device list (AXL/CCMAdmin) from hosts with valid admin access
 
 ### Output Options
 - `--csv FILENAME`: Export discovered credentials to CSV file
