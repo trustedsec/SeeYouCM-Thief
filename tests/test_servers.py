@@ -13,7 +13,7 @@ SERVERS_XML = """<servers>
 <server>cucm-sub1.example.com</server>
 </servers>"""
 
-SERVERS_XML_15X_PLAINTEXT = """<servers>
+SERVERS_XML_WITH_URI_ATTR = """<servers>
 <server uri="/cucm-uds/servers/1">cucm-pub.example.com</server>
 <server uri="/cucm-uds/servers/2">cucm-sub1.example.com</server>
 </servers>"""
@@ -36,8 +36,8 @@ class TestGetServersApi:
             {'hostName': 'cucm-sub1.example.com'},
         ]
 
-    def test_falls_back_to_plaintext_for_15x_servers(self, monkeypatch):
-        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(SERVERS_XML_15X_PLAINTEXT))
+    def test_tolerates_uri_attribute_on_server_element(self, monkeypatch):
+        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(SERVERS_XML_WITH_URI_ATTR))
         servers = thief.get_servers_api('cucm1')
         assert servers == [
             {'hostName': 'cucm-pub.example.com'},
@@ -76,6 +76,10 @@ class TestGetServersApi:
 
 
 class TestLogClusterServersToDb:
+    # Note: ipv4Address, ipv6Address, and serverType no longer come from get_servers_api
+    # (which returns only hostName per v14 schema). These fields are kept in the DB schema
+    # for DNS/AXL enrichment from other sources and compatibility with existing databases.
+
     def test_inserts_servers_with_any_identifying_field(self, db_path):
         servers = [
             {'hostName': 'cucm-pub.example.com', 'ipv4Address': '10.0.0.1', 'serverType': 'Publisher'},

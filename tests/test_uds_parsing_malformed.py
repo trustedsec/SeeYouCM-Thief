@@ -88,10 +88,10 @@ class TestUdsNextLink:
         url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users?foo=bar', 10)
         assert url == 'https://cucm1:8443/cucm-uds/users?foo=bar&start=10'
 
-    def test_handles_zero_based_start_offset(self):
-        # UDS uses 0-based indexing; offset 0 is valid
-        url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users', 0)
-        assert '?start=0' in url
+    def test_appends_nonzero_start_offset(self):
+        # Nonzero offset: append ?start=N
+        url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users', 33)
+        assert url == 'https://cucm1:8443/cucm-uds/users?start=33'
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +126,19 @@ class TestIterUdsUserPagesTermination:
         # which the seen_urls set detects and breaks the loop.
         body = '<users start="0" returnedCount="1" totalCount="1000"><user><userName>a</userName></user></users>'
 
-        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(body))
+        calls = []
+        def capture_get(url, **kw):
+            calls.append(url)
+            return _resp(body)
+
+        monkeypatch.setattr(thief.requests, 'get', capture_get)
         pages = list(thief._iter_uds_user_pages('cucm1', max_pages=100))
         # Page 1: base URL (no start param), next_start = 0 + 1 = 1
         # Page 2: ?start=1, next_start = 0 + 1 = 1 (same calculation)
         # Next URL would be ?start=1 again, but it's already in seen_urls
         assert len(pages) == 2
+        assert len(calls) == 2
+        assert calls[1].endswith('/cucm-uds/users?start=1')
 
     def test_terminates_on_non_200_response(self, monkeypatch):
         monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp('error', status_code=500))
@@ -144,8 +151,9 @@ class TestIterUdsUserPagesTermination:
         assert list(thief._iter_uds_user_pages('cucm1')) == []
 
     def test_respects_max_pages_guard(self, monkeypatch):
-        # Server always returns a fresh next-link with data but no totalCount:
-        # max_pages must still bound the iteration.
+        # Responses omit start/returnedCount, so the fallback arithmetic
+        # (next_start = collected) produces a fresh URL on each page; max_pages
+        # must still bound the iteration.
         calls = {'n': 0}
 
         def fake_get(url, **kw):
