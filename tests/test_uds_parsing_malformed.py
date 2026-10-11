@@ -76,31 +76,22 @@ class TestParseUdsDevicesMalformed:
 # ---------------------------------------------------------------------------
 # _uds_next_link
 # ---------------------------------------------------------------------------
-# NOTE: The following tests pin pre-PR #40 (feat/uds-schema-conformance, commit
-# 9456586) behavior. When that branch merges, the signature and behavior of
-# _uds_next_link will change from _uds_next_link(body, base_url, fallback_start)
-# to _uds_next_link(base_url, start), removing support for HATEOAS link probing
-# and <next> tag parsing. These tests will need to be updated or removed at that
-# time.
 
 class TestUdsNextLink:
-    def test_prefers_hateoas_rel_next_link(self):
-        body = '<link rel="next" href="https://cucm1:8443/cucm-uds/users?start=50"/>'
-        assert thief._uds_next_link(body, 'https://cucm1:8443/cucm-uds/users', 1) == \
-            'https://cucm1:8443/cucm-uds/users?start=50'
+    def test_appends_start_param_to_base_url_without_query_string(self):
+        # Base URL without query string: append ?start=N
+        url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users', 0)
+        assert url == 'https://cucm1:8443/cucm-uds/users?start=0'
 
-    def test_falls_back_to_next_tag(self):
-        body = '<next>https://cucm1:8443/cucm-uds/users?start=50</next>'
-        assert thief._uds_next_link(body, 'https://cucm1:8443/cucm-uds/users', 1) == \
-            'https://cucm1:8443/cucm-uds/users?start=50'
+    def test_appends_start_param_with_ampersand_when_query_string_exists(self):
+        # Base URL with existing query string: append &start=N
+        url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users?foo=bar', 10)
+        assert url == 'https://cucm1:8443/cucm-uds/users?foo=bar&start=10'
 
-    def test_falls_back_to_synthesized_start_param(self):
-        assert thief._uds_next_link('no pagination hints here', 'https://cucm1:8443/cucm-uds/users', 33) == \
-            'https://cucm1:8443/cucm-uds/users?start=33'
-
-    def test_never_returns_none(self):
-        # Documented behavior: always synthesizes a URL even on garbage input.
-        assert thief._uds_next_link('', '', 0) is not None
+    def test_appends_nonzero_start_offset(self):
+        # Nonzero offset: append ?start=N
+        url = thief._uds_next_link('https://cucm1:8443/cucm-uds/users', 33)
+        assert url == 'https://cucm1:8443/cucm-uds/users?start=33'
 
 
 # ---------------------------------------------------------------------------
@@ -129,19 +120,25 @@ class TestIterUdsUserPagesTermination:
         assert calls['n'] == 2
 
     def test_terminates_on_pagination_loop_detection(self, monkeypatch):
-        # _uds_next_link never returns None, so if the server keeps returning
-        # the SAME next-link, seen_urls must break the loop rather than
-        # spinning forever.
-        loop_url = 'https://cucm1:8443/cucm-uds/users?start=1'
-        body = f'<users><user><userName>a</userName></user><next>{loop_url}</next></users>'
+        # Server always returns start="0" returnedCount="1", so the arithmetic
+        # next_start = start + returnedCount always yields 1. This causes
+        # _uds_next_link(base, 1) to produce the same URL on every iteration,
+        # which the seen_urls set detects and breaks the loop.
+        body = '<users start="0" returnedCount="1" totalCount="1000"><user><userName>a</userName></user></users>'
 
-        monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp(body))
-        pages = list(thief._iter_uds_user_pages('cucm1', max_pages=5))
-        # base is fetched, yields <next>loop_url</next>; loop_url is fetched
-        # once (still novel), yields the same <next>loop_url</next> again;
-        # on the third attempt loop_url is already in seen_urls and the
-        # generator stops rather than looping forever.
+        calls = []
+        def capture_get(url, **kw):
+            calls.append(url)
+            return _resp(body)
+
+        monkeypatch.setattr(thief.requests, 'get', capture_get)
+        pages = list(thief._iter_uds_user_pages('cucm1', max_pages=100))
+        # Page 1: base URL (no start param), next_start = 0 + 1 = 1
+        # Page 2: ?start=1, next_start = 0 + 1 = 1 (same calculation)
+        # Next URL would be ?start=1 again, but it's already in seen_urls
         assert len(pages) == 2
+        assert len(calls) == 2
+        assert calls[1].endswith('/cucm-uds/users?start=1')
 
     def test_terminates_on_non_200_response(self, monkeypatch):
         monkeypatch.setattr(thief.requests, 'get', lambda *a, **kw: _resp('error', status_code=500))
@@ -154,8 +151,9 @@ class TestIterUdsUserPagesTermination:
         assert list(thief._iter_uds_user_pages('cucm1')) == []
 
     def test_respects_max_pages_guard(self, monkeypatch):
-        # Server always returns a fresh next-link with data but no totalCount:
-        # max_pages must still bound the iteration.
+        # Responses omit start/returnedCount, so the fallback arithmetic
+        # (next_start = collected) produces a fresh URL on each page; max_pages
+        # must still bound the iteration.
         calls = {'n': 0}
 
         def fake_get(url, **kw):
