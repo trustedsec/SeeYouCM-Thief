@@ -19,7 +19,7 @@ import concurrent.futures
 import random
 import secrets
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from contextlib import redirect_stdout, redirect_stderr
 from alive_progress import alive_bar
 import tftpy
@@ -3053,17 +3053,22 @@ def get_phones_from_gowitness(gowitness_db):
             conn.close()
             return []
         
-        cursor.execute('''
-            SELECT DISTINCT REPLACE(SUBSTR(url, 8, INSTR(SUBSTR(url, 8), ':') - 1), '/', '') as ip 
-            FROM results 
-            WHERE title LIKE '%Cisco%' 
-            ORDER BY ip
-        ''')
+        cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
         
         results = cursor.fetchall()
         conn.close()
         
-        phones = [row[0] for row in results if row[0]]
+        hosts = set()
+        for (url,) in results:
+            if not url:
+                continue
+            try:
+                host = urlsplit(url).hostname
+            except ValueError:
+                continue
+            if host:
+                hosts.add(host)
+        phones = sorted(hosts)
         
         if phones:
             print(f'[+] Found {len(phones)} Cisco phone(s) in gowitness database')
