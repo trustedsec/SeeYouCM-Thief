@@ -123,3 +123,66 @@ def test_enumsubnet_prints_and_logs_found_credentials(leaves, monkeypatch, tmp_p
     assert 'admin\tpw\tSEP001122334455.cnf.xml' in out
     assert 'Usernames Found in Configurations!' in out
     assert _count(db, 'credentials') == 1
+
+
+def test_enumsubnet_detects_cucm_for_each_phone(leaves, monkeypatch, tmp_path):
+    hosts = [
+        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005'},
+        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006'},
+    ]
+    detected = []
+
+    def detect(ip):
+        detected.append(ip)
+        return {'10.0.0.5': 'cucm-a.test', '10.0.0.6': 'cucm-b.test'}[ip]
+
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', detect)
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda host: '10.0.0.1')
+
+    def config_names(cucm_host, hostnames=None, use_tftp=True):
+        leaves['config_names'].append((cucm_host, hostnames))
+        return [f'{hostnames[0]}.cnf.xml'] if hostnames else []
+
+    monkeypatch.setattr(thief, 'get_config_names', config_names)
+    monkeypatch.setattr(
+        thief, 'search_for_secrets',
+        lambda cucm, file, use_tftp=True: ([(cucm, 'pw', file)], []),
+    )
+    db = str(tmp_path / 'thief.db')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--db', db)
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert detected == ['10.0.0.5', '10.0.0.6']
+    assert leaves['config_names'] == [
+        ('cucm-a.test', ['SEP000000000005']),
+        ('cucm-b.test', ['SEP000000000006']),
+    ]
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute('SELECT cucm_host, username FROM credentials ORDER BY cucm_host').fetchall()
+    assert rows == [('cucm-a.test', 'cucm-a.test'), ('cucm-b.test', 'cucm-b.test')]
+
+
+def test_enumsubnet_explicit_host_is_used_for_each_phone(leaves, monkeypatch, tmp_path):
+    hosts = [
+        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005'},
+        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006'},
+    ]
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone',
+                        lambda ip: pytest.fail('explicit -H must bypass detection'))
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda host: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '-H', 'operator.test',
+          '--db', str(tmp_path / 'thief.db'))
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert leaves['config_names'] == [
+        ('operator.test', ['SEP000000000005']),
+        ('operator.test', ['SEP000000000006']),
+    ]
