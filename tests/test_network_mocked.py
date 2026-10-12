@@ -661,6 +661,60 @@ class TestGetConfigNames:
         assert set(result) == set(thief.DEFAULT_TFTP_FILES)
 
 
+class TestGetConfigNamesFallback:
+    """Test that unreadable hostnames ([None]) fall back to the cache list (#59)."""
+
+    def test_none_hostname_fetches_cache_list(self, monkeypatch):
+        """Test A1: hostnames=[None], use_tftp=False falls back to cache list."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml', 'notes.txt']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=[None], use_tftp=False)
+
+        # Recorder should be called once with use_tftp=False
+        assert len(calls) == 1
+        assert calls[0] == (('cucm.test',), {'use_tftp': False})
+        # Result should contain the .cnf.xml but not notes.txt, plus defaults
+        assert 'SEPAAAAAAAAAAAA.cnf.xml' in result
+        assert 'notes.txt' not in result
+        # Verify defaults are still appended
+        for default in thief.DEFAULT_TFTP_FILES:
+            assert default in result
+
+    def test_empty_and_whitespace_hostnames_fetch_cache_list(self, monkeypatch):
+        """Test A2: hostnames=['', '   '] falls back to cache list."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=['', '   '])
+
+        # Recorder should be called once
+        assert len(calls) == 1
+        assert calls[0][0] == ('cucm.test',)
+        assert 'SEPAAAAAAAAAAAA.cnf.xml' in result
+
+    def test_valid_hostname_does_not_fetch_cache_list(self, monkeypatch):
+        """Test A3: hostnames=['SEP001122334455'] does NOT fetch cache list (regression guard)."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=['SEP001122334455'])
+
+        # Recorder should NOT be called
+        assert len(calls) == 0
+        # Result should start with the provided hostname
+        assert result[0] == 'SEP001122334455.cnf.xml'
+
+
 # ---------------------------------------------------------------------------
 # build_brute_force_candidates
 # ---------------------------------------------------------------------------

@@ -695,6 +695,10 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
         # the production path.
         return ["SEPTEST00000000.cnf.xml", *DEFAULT_TFTP_FILES]
 
+    # Unreadable phone hostnames arrive as None/'' (e.g. [None] from -p/-e);
+    # treat them as absent so the cache-list fallback below can run (#59).
+    hostnames = [h for h in (hostnames or []) if h and h.strip()]
+
     filenames = []
     seen = set()
 
