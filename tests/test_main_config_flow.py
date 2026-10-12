@@ -186,3 +186,84 @@ def test_enumsubnet_explicit_host_is_used_for_each_phone(leaves, monkeypatch, tm
         ('operator.test', ['SEP000000000005']),
         ('operator.test', ['SEP000000000006']),
     ]
+
+
+@pytest.fixture
+def subnet_two_cucms(monkeypatch):
+    """Two phones on one subnet, each registered to a different CUCM (#50)."""
+    calls = {'detect': [], 'config_names': []}
+    phone_cucm = {'10.0.0.5': 'cucm-a.test', '10.0.0.6': 'cucm-b.test'}
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: [
+        {'ip': '10.0.0.5', 'hostname': 'SEP0000000000AA',
+         'url': 'http://cucm-a.test:6970/SEP0000000000AA.cnf.xml'},
+        {'ip': '10.0.0.6', 'hostname': 'SEP0000000000BB',
+         'url': 'http://cucm-b.test:6970/SEP0000000000BB.cnf.xml'},
+    ])
+
+    def detect(ip):
+        calls['detect'].append(ip)
+        return phone_cucm.get(ip)
+
+    def names(cucm_host, hostnames=None, use_tftp=True):
+        calls['config_names'].append((cucm_host, hostnames))
+        return [f'{hostnames[0]}.cnf.xml']
+
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', detect)
+    monkeypatch.setattr(thief, 'get_config_names', names)
+    monkeypatch.setattr(thief, 'search_for_secrets',
+                        lambda h, f, use_tftp=True: ([('admin', f'pw-{h}', f)], []))
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda h: '10.0.0.1')
+    return calls, phone_cucm
+
+
+def _cred_rows(db):
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(
+            'SELECT cucm_host, device, password FROM credentials ORDER BY device'
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_enumsubnet_detects_cucm_per_phone(subnet_two_cucms, monkeypatch, tmp_path):
+    calls, _ = subnet_two_cucms
+    db = str(tmp_path / 'thief.db')
+    _argv(monkeypatch, '-e', '10.0.0.0/29', '--db', db)
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert calls['detect'] == ['10.0.0.5', '10.0.0.6']
+    assert [cucm for cucm, _ in calls['config_names']] == ['cucm-a.test', 'cucm-b.test']
+    assert _cred_rows(db) == [
+        ('cucm-a.test', 'SEP0000000000AA', 'pw-cucm-a.test'),
+        ('cucm-b.test', 'SEP0000000000BB', 'pw-cucm-b.test'),
+    ]
+
+
+def test_enumsubnet_explicit_host_is_used_for_every_phone(subnet_two_cucms, monkeypatch, tmp_path):
+    """Regression guard (passes before and after the fix): -H wins for all phones."""
+    calls, _ = subnet_two_cucms
+    db = str(tmp_path / 'thief.db')
+    _argv(monkeypatch, '-H', 'cucm-explicit.test', '-e', '10.0.0.0/29', '--db', db)
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert calls['detect'] == []
+    assert [cucm for cucm, _ in calls['config_names']] == ['cucm-explicit.test'] * 2
+    assert [row[0] for row in _cred_rows(db)] == ['cucm-explicit.test'] * 2
+
+
+def test_enumsubnet_skips_phone_with_undetectable_cucm(subnet_two_cucms, monkeypatch, tmp_path, capsys):
+    calls, phone_cucm = subnet_two_cucms
+    del phone_cucm['10.0.0.5']  # first phone: CUCM detection fails
+    db = str(tmp_path / 'thief.db')
+    _argv(monkeypatch, '-e', '10.0.0.0/29', '--db', db)
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert 'Unable to automatically detect the CUCM Server for 10.0.0.5. Skipping...' in out
+    assert calls['detect'] == ['10.0.0.5', '10.0.0.6']
+    assert [cucm for cucm, _ in calls['config_names']] == ['cucm-b.test']
+    assert _cred_rows(db) == [('cucm-b.test', 'SEP0000000000BB', 'pw-cucm-b.test')]
