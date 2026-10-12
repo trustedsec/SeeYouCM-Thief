@@ -133,6 +133,19 @@ def test_8865_subnet():
     with open('tests/cisco-CP-8865.html') as html_file:
         assert parse_subnet(html_file.read()) == '255.255.254.0'
 
+def test_8832_cucm():
+    with open('tests/cisco-CP-8832.html') as html_file:
+        assert parse_cucm(html_file.read()) == 'cucm1.example.com'
+
+def test_8832_subnet():
+    with open('tests/cisco-CP-8832.html') as html_file:
+        assert parse_subnet(html_file.read()) == '255.255.255.0'
+
+def test_8832_is_a_known_model(capsys):
+    with open('tests/cisco-CP-8832.html') as html_file:
+        model = warn_if_unknown_phone_model(html_file.read())
+    assert model == 'CP-8832'
+    assert capsys.readouterr().out == ''
 
 def test_7811_cucm():
     with open('tests/cisco-CP-7811.html') as html_file:
@@ -233,4 +246,5 @@ def test_warn_if_unknown_phone_model_unverified_model_flags(capsys):
 def test_known_phone_models_matches_fixtures():
     assert 'CP-8831' not in KNOWN_PHONE_MODELS
     assert 'CP-7811' in KNOWN_PHONE_MODELS
+    assert 'CP-8832' in KNOWN_PHONE_MODELS
 
