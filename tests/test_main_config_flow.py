@@ -161,8 +161,11 @@ def test_enumsubnet_detects_cucm_for_each_phone(leaves, monkeypatch, tmp_path):
         ('cucm-a.test', ['SEP000000000005']),
         ('cucm-b.test', ['SEP000000000006']),
     ]
-    with sqlite3.connect(db) as conn:
+    conn = sqlite3.connect(db)
+    try:
         rows = conn.execute('SELECT cucm_host, username FROM credentials ORDER BY cucm_host').fetchall()
+    finally:
+        conn.close()
     assert rows == [('cucm-a.test', 'cucm-a.test'), ('cucm-b.test', 'cucm-b.test')]
 
 
