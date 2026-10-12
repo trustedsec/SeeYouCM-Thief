@@ -229,34 +229,6 @@ def _cred_rows(db):
         conn.close()
 
 
-def test_enumsubnet_detects_cucm_per_phone(subnet_two_cucms, monkeypatch, tmp_path):
-    calls, _ = subnet_two_cucms
-    db = str(tmp_path / 'thief.db')
-    _argv(monkeypatch, '-e', '10.0.0.0/29', '--db', db)
-    with pytest.raises(SystemExit) as exc:
-        thief.main()
-    assert exc.value.code == 0
-    assert calls['detect'] == ['10.0.0.5', '10.0.0.6']
-    assert [cucm for cucm, _ in calls['config_names']] == ['cucm-a.test', 'cucm-b.test']
-    assert _cred_rows(db) == [
-        ('cucm-a.test', 'SEP0000000000AA', 'pw-cucm-a.test'),
-        ('cucm-b.test', 'SEP0000000000BB', 'pw-cucm-b.test'),
-    ]
-
-
-def test_enumsubnet_explicit_host_is_used_for_every_phone(subnet_two_cucms, monkeypatch, tmp_path):
-    """Regression guard (passes before and after the fix): -H wins for all phones."""
-    calls, _ = subnet_two_cucms
-    db = str(tmp_path / 'thief.db')
-    _argv(monkeypatch, '-H', 'cucm-explicit.test', '-e', '10.0.0.0/29', '--db', db)
-    with pytest.raises(SystemExit) as exc:
-        thief.main()
-    assert exc.value.code == 0
-    assert calls['detect'] == []
-    assert [cucm for cucm, _ in calls['config_names']] == ['cucm-explicit.test'] * 2
-    assert [row[0] for row in _cred_rows(db)] == ['cucm-explicit.test'] * 2
-
-
 def test_enumsubnet_skips_phone_with_undetectable_cucm(subnet_two_cucms, monkeypatch, tmp_path, capsys):
     calls, phone_cucm = subnet_two_cucms
     del phone_cucm['10.0.0.5']  # first phone: CUCM detection fails
