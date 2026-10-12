@@ -20,7 +20,7 @@ import random
 import secrets
 from datetime import datetime
 from urllib.parse import quote, urlsplit
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import closing, redirect_stdout, redirect_stderr
 from alive_progress import alive_bar
 import tftpy
 import urllib3
@@ -3046,21 +3046,18 @@ def get_phones_from_gowitness(gowitness_db):
             print(f'[-] Please verify the path and try again')
             return []
         
-        conn = sqlite3.connect(gowitness_db)
-        cursor = conn.cursor()
-        
-        # Check if results table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='results'")
-        if not cursor.fetchone():
-            print(f'[-] Error: No "results" table found in {gowitness_db}')
-            print(f'[-] This may not be a valid gowitness database')
-            conn.close()
-            return []
-        
-        cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
-        
-        results = cursor.fetchall()
-        conn.close()
+        with closing(sqlite3.connect(gowitness_db)) as conn:
+            cursor = conn.cursor()
+
+            # Check if results table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='results'")
+            if not cursor.fetchone():
+                print(f'[-] Error: No "results" table found in {gowitness_db}')
+                print(f'[-] This may not be a valid gowitness database')
+                return []
+
+            cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
+            results = cursor.fetchall()
         
         hosts = set()
         for (url,) in results:
