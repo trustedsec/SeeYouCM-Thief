@@ -1,7 +1,10 @@
 # .github/workflows/version-bump.yml
 name: Version Bump
+# pull_request runs for fork PRs with a read-only GITHUB_TOKEN, causing tag push to 403 (#52, #54).
+# pull_request_target runs in the base repo's context with write access. Safe here: job never
+# checks out or executes PR code, and github.head_ref is only passed through an env var.
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [main]
 
