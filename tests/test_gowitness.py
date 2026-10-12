@@ -61,3 +61,44 @@ def test_deduplicates_and_sorts_ips(tmp_path):
     ])
     phones = thief.get_phones_from_gowitness(str(db))
     assert phones == ["10.0.0.2", "10.0.0.9"]
+
+
+def test_extracts_hosts_from_urls_without_a_port(tmp_path):
+    """Regression for #51: portless URLs used to parse to '' and be dropped."""
+    db = tmp_path / "gowitness.sqlite3"
+    _make_gowitness_db(db, [
+        ("https://10.0.0.5/", "Cisco CP-8845"),
+        ("http://10.0.0.7/", "Cisco CP-7841"),
+        ("https://10.0.0.6:443/", "Cisco CP-8851"),
+    ])
+    assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
+
+
+def test_extracts_hosts_without_trailing_slash_or_with_a_path(tmp_path):
+    db = tmp_path / "gowitness.sqlite3"
+    _make_gowitness_db(db, [
+        ("http://10.0.0.8", "Cisco CP-7945G"),
+        ("https://10.0.0.9:8443/CGI/Java/Serviceability?adapter=device.statistics.device", "Cisco CP-8865"),
+    ])
+    assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.8", "10.0.0.9"]
+
+
+def test_same_host_on_different_schemes_and_ports_is_deduplicated(tmp_path):
+    db = tmp_path / "gowitness.sqlite3"
+    _make_gowitness_db(db, [
+        ("http://10.0.0.5/", "Cisco CP-8845"),
+        ("https://10.0.0.5:443/", "Cisco CP-8845"),
+    ])
+    assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.5"]
+
+
+def test_skips_rows_with_unparseable_or_empty_urls(tmp_path):
+    db = tmp_path / "gowitness.sqlite3"
+    _make_gowitness_db(db, [
+        ("not a url", "Cisco CP-8845"),
+        ("", "Cisco CP-8845"),
+        (None, "Cisco CP-8845"),
+        ("http://[::1", "Cisco CP-8845"),  # urlsplit raises ValueError (unclosed IPv6 bracket)
+        ("https://10.0.0.5/", "Cisco CP-8845"),
+    ])
+    assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.5"]

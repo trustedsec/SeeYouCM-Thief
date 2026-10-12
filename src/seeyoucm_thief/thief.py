@@ -19,7 +19,7 @@ import concurrent.futures
 import random
 import secrets
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from contextlib import redirect_stdout, redirect_stderr
 from alive_progress import alive_bar
 import tftpy
@@ -3026,6 +3026,20 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
     except Exception as e:
         print(f'[-] Error displaying database summary: {str(e)}')
 
+def _gowitness_url_host(url):
+    """Return the host of a gowitness result URL, or None if it has none.
+
+    Parsed in Python rather than SQL: the old SUBSTR/INSTR expression assumed
+    every URL carried an explicit :port and returned '' for https://10.0.0.5/.
+    """
+    if not url:
+        return None
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
 def get_phones_from_gowitness(gowitness_db):
     """
     Extract Cisco phone IP addresses from gowitness SQLite database
@@ -3053,17 +3067,11 @@ def get_phones_from_gowitness(gowitness_db):
             conn.close()
             return []
         
-        cursor.execute('''
-            SELECT DISTINCT REPLACE(SUBSTR(url, 8, INSTR(SUBSTR(url, 8), ':') - 1), '/', '') as ip 
-            FROM results 
-            WHERE title LIKE '%Cisco%' 
-            ORDER BY ip
-        ''')
-        
-        results = cursor.fetchall()
+        cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
+        rows = cursor.fetchall()
         conn.close()
-        
-        phones = [row[0] for row in results if row[0]]
+
+        phones = sorted({host for (url,) in rows if (host := _gowitness_url_host(url))})
         
         if phones:
             print(f'[+] Found {len(phones)} Cisco phone(s) in gowitness database')
