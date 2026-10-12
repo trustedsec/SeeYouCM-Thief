@@ -363,7 +363,11 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             tmp_path = tmp_file.name
-        client = tftpy.TftpClient(cucm_host, 69)
+        # Resolve before handing the host to tftpy: its context opens a UDP
+        # socket and only then resolves the name, so a resolution failure
+        # leaks that socket (#61). socket.gaierror propagates as before.
+        cucm_ip = socket.gethostbyname(cucm_host)
+        client = tftpy.TftpClient(cucm_ip, 69)
         client.download(filename, tmp_path, timeout=timeout)
         with open(tmp_path, "r", errors="ignore") as handle:
             data = handle.read()
