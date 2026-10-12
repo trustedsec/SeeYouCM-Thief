@@ -3060,7 +3060,7 @@ def get_phones_from_gowitness(gowitness_db):
         
         hosts = set()
         for (url,) in results:
-            if not url:
+            if not isinstance(url, str) or not url:
                 continue
             try:
                 host = urlsplit(url).hostname
