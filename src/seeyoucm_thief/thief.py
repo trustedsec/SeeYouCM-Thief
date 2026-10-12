@@ -3060,7 +3060,7 @@ def get_phones_from_gowitness(gowitness_db):
         
         hosts = set()
         for (url,) in results:
-            if not url:
+            if not isinstance(url, str) or not url:
                 continue
             try:
                 host = urlsplit(url).hostname
@@ -4127,7 +4127,9 @@ def main():
             found_credentials.clear()
             found_usernames.clear()
             phone_cucm = args.host if args.host is not None else get_cucm_name_from_phone(host["ip"])
-            if phone_cucm is not None and hostname_resolves(phone_cucm):
+            if phone_cucm is None:
+                print(f'Unable to automatically detect the CUCM Server for {host["ip"]}. Skipping...')
+            elif hostname_resolves(phone_cucm):
                 file_names = get_config_names(phone_cucm, hostnames=[host["hostname"]])
                 if file_names is None:
                     file_names = []
