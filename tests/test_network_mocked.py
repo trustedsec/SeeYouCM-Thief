@@ -1,8 +1,11 @@
 """Tests for functions that interact with TFTP/HTTP services, using mocked network boundaries."""
+import gc
 import os
 import queue
+import socket
 import threading
 import tempfile
+import warnings
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -196,6 +199,57 @@ class TestDownloadConfigTftp:
         monkeypatch.setattr(thief.tftpy, 'TftpClient', capture_client)
         thief.download_config_tftp('10.0.0.1', 'test.cnf.xml')
         assert calls[0] == ('10.0.0.1', 69)
+
+    @staticmethod
+    def _unresolvable(host):
+        raise socket.gaierror(8, 'nodename nor servname provided, or not known')
+
+    def test_unresolvable_host_returns_none_without_building_client(self, monkeypatch):
+        """#61: tftpy opens its UDP socket before resolving the host and leaks it
+        if resolution fails, so resolution must happen before TftpClient."""
+        monkeypatch.setattr(thief.socket, 'gethostbyname', self._unresolvable)
+        built = []
+        monkeypatch.setattr(thief.tftpy, 'TftpClient', lambda host, port: built.append(host))
+        assert thief.download_config_tftp('cucm.invalid', 'SEP001122334455.cnf.xml') is None
+        assert built == []
+
+    def test_unresolvable_host_raises_gaierror_when_requested(self, monkeypatch):
+        monkeypatch.setattr(thief.socket, 'gethostbyname', self._unresolvable)
+        built = []
+        monkeypatch.setattr(thief.tftpy, 'TftpClient', lambda host, port: built.append(host))
+        with pytest.raises(socket.gaierror):
+            thief.download_config_tftp('cucm.invalid', 'SEP001122334455.cnf.xml', raise_on_error=True)
+        assert built == []
+
+    def test_client_receives_resolved_address(self, monkeypatch):
+        monkeypatch.setattr(thief.socket, 'gethostbyname', lambda host: '10.9.8.7')
+        built = []
+        mock_client = MagicMock()
+
+        def fake_download(filename, tmp_path, timeout=5):
+            with open(tmp_path, 'w') as f:
+                f.write(SAMPLE_CONFIG_XML)
+
+        mock_client.download = fake_download
+
+        def fake_client(host, port):
+            built.append((host, port))
+            return mock_client
+
+        monkeypatch.setattr(thief.tftpy, 'TftpClient', fake_client)
+        assert thief.download_config_tftp('cucm.test', 'SEP001122334455.cnf.xml') == SAMPLE_CONFIG_XML
+        assert built == [('10.9.8.7', 69)]
+
+    def test_unresolvable_host_leaks_no_socket_with_real_tftpy(self, monkeypatch):
+        """End-to-end against the real tftpy client: no ResourceWarning."""
+        monkeypatch.setattr(thief.socket, 'gethostbyname', self._unresolvable)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', ResourceWarning)
+            assert thief.download_config_tftp('cucm.invalid', 'SEP001122334455.cnf.xml') is None
+            gc.collect()
+        leaks = [w for w in caught if issubclass(w.category, ResourceWarning)
+                 and 'socket' in str(w.message)]
+        assert leaks == []
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +659,60 @@ class TestGetConfigNames:
         # since they're attempted unconditionally.
         result = thief.get_config_names(None, hostnames=None)
         assert set(result) == set(thief.DEFAULT_TFTP_FILES)
+
+
+class TestGetConfigNamesFallback:
+    """Test that unreadable hostnames ([None]) fall back to the cache list (#59)."""
+
+    def test_none_hostname_fetches_cache_list(self, monkeypatch):
+        """Test A1: hostnames=[None], use_tftp=False falls back to cache list."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml', 'notes.txt']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=[None], use_tftp=False)
+
+        # Recorder should be called once with use_tftp=False
+        assert len(calls) == 1
+        assert calls[0] == (('cucm.test',), {'use_tftp': False})
+        # Result should contain the .cnf.xml but not notes.txt, plus defaults
+        assert 'SEPAAAAAAAAAAAA.cnf.xml' in result
+        assert 'notes.txt' not in result
+        # Verify defaults are still appended
+        for default in thief.DEFAULT_TFTP_FILES:
+            assert default in result
+
+    def test_empty_and_whitespace_hostnames_fetch_cache_list(self, monkeypatch):
+        """Test A2: hostnames=['', '   '] falls back to cache list."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=['', '   '])
+
+        # Recorder should be called once
+        assert len(calls) == 1
+        assert calls[0][0] == ('cucm.test',)
+        assert 'SEPAAAAAAAAAAAA.cnf.xml' in result
+
+    def test_valid_hostname_does_not_fetch_cache_list(self, monkeypatch):
+        """Test A3: hostnames=['SEP001122334455'] does NOT fetch cache list (regression guard)."""
+        calls = []
+        def recorder(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+        monkeypatch.setattr(thief, 'get_cache_list', recorder)
+        result = thief.get_config_names('cucm.test', hostnames=['SEP001122334455'])
+
+        # Recorder should NOT be called
+        assert len(calls) == 0
+        # Result should start with the provided hostname
+        assert result[0] == 'SEP001122334455.cnf.xml'
 
 
 # ---------------------------------------------------------------------------

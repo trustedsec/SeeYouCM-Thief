@@ -106,3 +106,53 @@ def test_skips_non_string_url_values(tmp_path):
         ("https://10.0.0.5/", "Cisco CP-8845"),
     ])
     assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.5"]
+
+
+class _CloseSpy:
+    """Wrap a real sqlite3 connection and count close() calls (#62)."""
+
+    def __init__(self, conn, closes):
+        self._conn = conn
+        self._closes = closes
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):
+        self._closes.append(True)
+        self._conn.close()
+
+
+def _spy_on_connect(monkeypatch):
+    real_connect = sqlite3.connect
+    closes = []
+    monkeypatch.setattr(thief.sqlite3, 'connect',
+                        lambda *a, **kw: _CloseSpy(real_connect(*a, **kw), closes))
+    return closes
+
+
+def test_connection_closed_when_query_raises(tmp_path, monkeypatch):
+    not_a_db = tmp_path / "notadb.sqlite3"
+    not_a_db.write_text("this is not a sqlite database")
+    closes = _spy_on_connect(monkeypatch)
+    assert thief.get_phones_from_gowitness(str(not_a_db)) == []
+    assert closes == [True]
+
+
+def test_connection_closed_once_on_success(tmp_path, monkeypatch):
+    db = tmp_path / "gowitness.sqlite3"
+    _make_gowitness_db(db, [("https://10.0.0.5/", "Cisco CP-8845")])
+    closes = _spy_on_connect(monkeypatch)
+    assert thief.get_phones_from_gowitness(str(db)) == ["10.0.0.5"]
+    assert closes == [True]
+
+
+def test_connection_closed_once_when_results_table_missing(tmp_path, monkeypatch):
+    db = tmp_path / "empty.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    conn.close()
+    closes = _spy_on_connect(monkeypatch)
+    assert thief.get_phones_from_gowitness(str(db)) == []
+    assert closes == [True]

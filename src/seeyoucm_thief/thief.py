@@ -20,7 +20,7 @@ import random
 import secrets
 from datetime import datetime
 from urllib.parse import quote, urlsplit
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import closing, redirect_stdout, redirect_stderr
 from alive_progress import alive_bar
 import tftpy
 import urllib3
@@ -363,7 +363,11 @@ def download_config_tftp(cucm_host, filename, timeout=5, raise_on_error=False):
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             tmp_path = tmp_file.name
-        client = tftpy.TftpClient(cucm_host, 69)
+        # Resolve before handing the host to tftpy: its context opens a UDP
+        # socket and only then resolves the name, so a resolution failure
+        # leaks that socket (#61). socket.gaierror propagates as before.
+        cucm_ip = socket.gethostbyname(cucm_host)
+        client = tftpy.TftpClient(cucm_ip, 69)
         client.download(filename, tmp_path, timeout=timeout)
         with open(tmp_path, "r", errors="ignore") as handle:
             data = handle.read()
@@ -690,6 +694,10 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
         # that monkeypatch _TEST_MODE off still get consistent behavior with
         # the production path.
         return ["SEPTEST00000000.cnf.xml", *DEFAULT_TFTP_FILES]
+
+    # Unreadable phone hostnames arrive as None/'' (e.g. [None] from -p/-e);
+    # treat them as absent so the cache-list fallback below can run (#59).
+    hostnames = [h for h in (hostnames or []) if h and h.strip()]
 
     filenames = []
     seen = set()
@@ -3042,21 +3050,18 @@ def get_phones_from_gowitness(gowitness_db):
             print(f'[-] Please verify the path and try again')
             return []
         
-        conn = sqlite3.connect(gowitness_db)
-        cursor = conn.cursor()
-        
-        # Check if results table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='results'")
-        if not cursor.fetchone():
-            print(f'[-] Error: No "results" table found in {gowitness_db}')
-            print(f'[-] This may not be a valid gowitness database')
-            conn.close()
-            return []
-        
-        cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
-        
-        results = cursor.fetchall()
-        conn.close()
+        with closing(sqlite3.connect(gowitness_db)) as conn:
+            cursor = conn.cursor()
+
+            # Check if results table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='results'")
+            if not cursor.fetchone():
+                print(f'[-] Error: No "results" table found in {gowitness_db}')
+                print(f'[-] This may not be a valid gowitness database')
+                return []
+
+            cursor.execute("SELECT url FROM results WHERE title LIKE '%Cisco%'")
+            results = cursor.fetchall()
         
         hosts = set()
         for (url,) in results:
@@ -4130,7 +4135,7 @@ def main():
             if phone_cucm is None:
                 print(f'Unable to automatically detect the CUCM Server for {host["ip"]}. Skipping...')
             elif hostname_resolves(phone_cucm):
-                file_names = get_config_names(phone_cucm, hostnames=[host["hostname"]])
+                file_names = get_config_names(phone_cucm, hostnames=[host["hostname"]], use_tftp=use_tftp)
                 if file_names is None:
                     file_names = []
                 for file in file_names:
@@ -4180,7 +4185,7 @@ def main():
             hostnames += get_phones_hostnames_from_reverse(phone) or []
 
             # Get config files
-            file_names = get_config_names(phone_cucm, hostnames=hostnames)
+            file_names = get_config_names(phone_cucm, hostnames=hostnames, use_tftp=use_tftp)
             if file_names is None:
                 _safe_print('Unable to detect file names from CUCM for {}'.format(phone))
                 return

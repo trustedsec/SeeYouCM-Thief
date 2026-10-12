@@ -242,3 +242,81 @@ def test_enumsubnet_skips_phone_with_undetectable_cucm(subnet_two_cucms, monkeyp
     assert calls['detect'] == ['10.0.0.5', '10.0.0.6']
     assert [cucm for cucm, _ in calls['config_names']] == ['cucm-b.test']
     assert _cred_rows(db) == [('cucm-b.test', 'SEP0000000000BB', 'pw-cucm-b.test')]
+
+
+def _capture_config_names(monkeypatch):
+    """Patch get_config_names to record the use_tftp each call receives (#59)."""
+    seen = []
+
+    def fake(cucm_host, hostnames=None, use_tftp=True):
+        seen.append(use_tftp)
+        return ['SEP001122334455.cnf.xml']
+
+    monkeypatch.setattr(thief, 'get_config_names', fake)
+    return seen
+
+
+def test_phone_path_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
+    seen = _capture_config_names(monkeypatch)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-T', '1', '--http', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [False]
+
+
+def test_phone_path_defaults_to_tftp_for_config_names(leaves, monkeypatch, tmp_path):
+    """Regression guard (passes before and after the fix)."""
+    seen = _capture_config_names(monkeypatch)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-T', '1', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [True]
+
+
+def test_enumsubnet_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
+    seen = _capture_config_names(monkeypatch)
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: [
+        {'ip': '10.0.0.5', 'hostname': 'SEP001122334455',
+         'url': 'http://cucm.test:6970/SEP001122334455.cnf.xml'},
+    ])
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda h: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--http', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [False]
+
+
+def test_phone_with_unreadable_hostname_uses_cache_list_http(monkeypatch, tmp_path, capsys):
+    """Test B: -p with unreadable hostname falls back to cache list over HTTP (#59)."""
+    cache_list_calls = []
+    search_filenames = []
+
+    def recorder_cache_list(*args, **kwargs):
+        cache_list_calls.append({'use_tftp': kwargs.get('use_tftp')})
+        return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+    def recorder_search(cucm, filename, use_tftp=True):
+        search_filenames.append(filename)
+        return ([], [])
+
+    # Patch all the leaves without using the `leaves` fixture (which stubs get_config_names)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda ip: 'cucm.test')
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda ip: None)
+    monkeypatch.setattr(thief, 'get_phones_hostnames_from_reverse', lambda ip: [])
+    monkeypatch.setattr(thief, 'get_cache_list', recorder_cache_list)
+    monkeypatch.setattr(thief, 'search_for_secrets', recorder_search)
+
+    db = str(tmp_path / 'thief.db')
+    _argv(monkeypatch, '-p', '10.0.0.5', '-T', '1', '--http', '--db', db)
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    # Verify cache list was called with use_tftp=False (because of --http)
+    assert cache_list_calls == [{'use_tftp': False}]
+    # Verify search_for_secrets received the cache list filename among its iterations
+    assert 'SEPAAAAAAAAAAAA.cnf.xml' in search_filenames
