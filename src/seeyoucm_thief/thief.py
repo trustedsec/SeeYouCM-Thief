@@ -4130,7 +4130,7 @@ def main():
             if phone_cucm is None:
                 print(f'Unable to automatically detect the CUCM Server for {host["ip"]}. Skipping...')
             elif hostname_resolves(phone_cucm):
-                file_names = get_config_names(phone_cucm, hostnames=[host["hostname"]])
+                file_names = get_config_names(phone_cucm, hostnames=[host["hostname"]], use_tftp=use_tftp)
                 if file_names is None:
                     file_names = []
                 for file in file_names:
@@ -4180,7 +4180,7 @@ def main():
             hostnames += get_phones_hostnames_from_reverse(phone) or []
 
             # Get config files
-            file_names = get_config_names(phone_cucm, hostnames=hostnames)
+            file_names = get_config_names(phone_cucm, hostnames=hostnames, use_tftp=use_tftp)
             if file_names is None:
                 _safe_print('Unable to detect file names from CUCM for {}'.format(phone))
                 return

@@ -242,3 +242,48 @@ def test_enumsubnet_skips_phone_with_undetectable_cucm(subnet_two_cucms, monkeyp
     assert calls['detect'] == ['10.0.0.5', '10.0.0.6']
     assert [cucm for cucm, _ in calls['config_names']] == ['cucm-b.test']
     assert _cred_rows(db) == [('cucm-b.test', 'SEP0000000000BB', 'pw-cucm-b.test')]
+
+
+def _capture_config_names(monkeypatch):
+    """Patch get_config_names to record the use_tftp each call receives (#59)."""
+    seen = []
+
+    def fake(cucm_host, hostnames=None, use_tftp=True):
+        seen.append(use_tftp)
+        return ['SEP001122334455.cnf.xml']
+
+    monkeypatch.setattr(thief, 'get_config_names', fake)
+    return seen
+
+
+def test_phone_path_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
+    seen = _capture_config_names(monkeypatch)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-T', '1', '--http', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [False]
+
+
+def test_phone_path_defaults_to_tftp_for_config_names(leaves, monkeypatch, tmp_path):
+    """Regression guard (passes before and after the fix)."""
+    seen = _capture_config_names(monkeypatch)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-T', '1', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [True]
+
+
+def test_enumsubnet_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
+    seen = _capture_config_names(monkeypatch)
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: [
+        {'ip': '10.0.0.5', 'hostname': 'SEP001122334455',
+         'url': 'http://cucm.test:6970/SEP001122334455.cnf.xml'},
+    ])
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda h: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--http', '--db', str(tmp_path / 'thief.db'))
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    assert seen == [False]
