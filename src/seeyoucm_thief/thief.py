@@ -3032,6 +3032,8 @@ def _gowitness_url_host(url):
     Parsed in Python rather than SQL: the old SUBSTR/INSTR expression assumed
     every URL carried an explicit :port and returned '' for https://10.0.0.5/.
     """
+    if not isinstance(url, str):
+        return None
     if not url:
         return None
     try:
