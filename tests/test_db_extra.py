@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sqlite3
 import pytest
@@ -46,14 +47,14 @@ def test_log_mac_prefix_to_db(tmp_path):
     # Log MAC prefix
     result = thief.log_mac_prefix_to_db(cucm_host, phone_ip, full_mac, partial_mac, str(db_path))
     assert result is True
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT cucm_host, phone_ip, full_mac, partial_mac FROM mac_prefixes")
-    row = cursor.fetchone()
-    assert row[0] == cucm_host
-    assert row[1] == phone_ip
-    assert row[2] == full_mac
-    assert row[3] == partial_mac
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT cucm_host, phone_ip, full_mac, partial_mac FROM mac_prefixes")
+        row = cursor.fetchone()
+        assert row[0] == cucm_host
+        assert row[1] == phone_ip
+        assert row[2] == full_mac
+        assert row[3] == partial_mac
 
 
 def test_log_phone_cucm_to_db(tmp_path):
