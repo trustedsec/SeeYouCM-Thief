@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Shared pytest configuration and fixtures for the SeeYouCM-thief test suite."""
+import ipaddress
 import os
 import socket
 import sys
@@ -66,18 +67,32 @@ def _blocked(*a, **kw):
 
 @pytest.fixture(autouse=True)
 def _no_real_network(request, monkeypatch):
-    """Autouse guard: any unmocked call into requests' session machinery or a
-    raw socket connect() raises immediately instead of hanging for the
-    library's default timeout. Tests that mock at a lower level (thief.requests.get,
+    """Autouse guard: unmocked requests, socket connects, and hostname lookups
+    fail locally instead of reaching the network or waiting for timeouts.
+    IP literals remain resolvable. Tests that mock at a lower level (thief.requests.get,
     thief.tftpy.TftpClient, a _probe_fn/_login_fn injection seam, or a fake
     Session object) never reach these patched targets, so this is safe to
     apply globally. Integration tests are exempt since they gate on env vars
     and pytest.skip() before touching the network."""
     if 'integration' in request.keywords or 'allow_network' in request.keywords:
         return
+    original_gethostbyname = socket.gethostbyname
+    original_getaddrinfo = socket.getaddrinfo
+
+    def local_lookup(resolver):
+        def guarded(host, *args, **kwargs):
+            try:
+                ipaddress.ip_address(host)
+            except (ValueError, TypeError):
+                raise socket.gaierror(socket.EAI_NONAME, 'name resolution disabled in tests')
+            return resolver(host, *args, **kwargs)
+        return guarded
+
     monkeypatch.setattr(requests.sessions.Session, 'request', _blocked)
     monkeypatch.setattr(socket.socket, 'connect', _blocked)
     monkeypatch.setattr(socket.socket, 'connect_ex', _blocked)
+    monkeypatch.setattr(socket, 'gethostbyname', local_lookup(original_gethostbyname))
+    monkeypatch.setattr(socket, 'getaddrinfo', local_lookup(original_getaddrinfo))
 
 
 # ---------------------------------------------------------------------------
