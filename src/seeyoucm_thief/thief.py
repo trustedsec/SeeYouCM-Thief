@@ -145,7 +145,7 @@ def enumerate_phones_subnet(input):
                         warn_if_unknown_phone_model(http_response.text)
                         cucm_host = parse_cucm(http_response.text)
                         return_url = f'http://{cucm_host}:6970/{filename}'
-                        phone_object = {"ip": host, "hostname": phone_hostname, "url": return_url}
+                        phone_object = {"ip": host, "hostname": phone_hostname, "url": return_url, "cucm": cucm_host}
                         hosts.append(phone_object)
                         print(f'[*] - Found Phone {phone_hostname} - IP {host}')
             except Exception as e:
@@ -4131,7 +4131,7 @@ def main():
         for host in hosts:
             found_credentials.clear()
             found_usernames.clear()
-            phone_cucm = args.host if args.host is not None else get_cucm_name_from_phone(host["ip"])
+            phone_cucm = args.host if args.host is not None else (host.get("cucm") or get_cucm_name_from_phone(host["ip"]))
             if phone_cucm is None:
                 print(f'Unable to automatically detect the CUCM Server for {host["ip"]}. Skipping...')
             elif hostname_resolves(phone_cucm):
