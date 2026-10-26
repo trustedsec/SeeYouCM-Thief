@@ -334,7 +334,7 @@ class TestPhoneModelsDispatch:
         def fake(phone_ips, output_dir='.', threads=40):
             seen['ips'] = phone_ips
             seen['threads'] = threads
-            return {'models': {}, 'saved': [], 'unknown': [], 'tarball': None}
+            return {'models': {'CP-8865': phone_ips[0]}, 'saved': [], 'unknown': [], 'tarball': None}
         monkeypatch.setattr(thief, 'query_phone_models', fake)
         return seen
 
@@ -371,3 +371,43 @@ class TestPhoneModelsDispatch:
         assert exc.value.code == 1
         assert 'No phone targets' in capsys.readouterr().out
         assert not (tmp_path / 'nope.db').exists()
+
+    def test_failed_gowitness_does_not_fall_back_to_db(self, monkeypatch, tmp_path, capsys):
+        seen = self._capture(monkeypatch)
+        db = thief.init_database(str(tmp_path / 'thief.db'))
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO phone_cucm (cucm_host, phone_ip, discovery_time) "
+                     "VALUES ('cucm', '10.0.0.5', 't')")
+        conn.commit()
+        conn.close()
+        _argv(monkeypatch, '--phone-models', '--gowitness', str(tmp_path / 'nope.sqlite3'), '--db', db)
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 1
+        assert 'ips' not in seen
+        assert 'No phone targets' in capsys.readouterr().out
+
+    def test_non_thief_db_exits_1(self, monkeypatch, tmp_path, capsys):
+        self._capture(monkeypatch)
+        bad = tmp_path / 'junk.db'
+        bad.write_text('not a database')
+        _argv(monkeypatch, '--phone-models', '--db', str(bad))
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 1
+        assert 'Could not read phones' in capsys.readouterr().out
+
+    def test_no_models_identified_exits_1(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(thief, 'query_phone_models', lambda phone_ips, output_dir='.', threads=40:
+                            {'models': {}, 'saved': [], 'unknown': [], 'tarball': None})
+        _argv(monkeypatch, '--phone-models', '-p', '10.0.0.1', '--db', str(tmp_path / 'thief.db'))
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 1
+
+    def test_debug_flag_enables_dbg(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(thief.requests, 'get', lambda url, **kw: (_ for _ in ()).throw(OSError('down')))
+        _argv(monkeypatch, '--phone-models', '-p', '10.0.0.1', '-d', '--db', str(tmp_path / 'thief.db'))
+        with pytest.raises(SystemExit):
+            thief.main()
+        assert '[DEBUG] Phone models: GET http://10.0.0.1' in capsys.readouterr().out

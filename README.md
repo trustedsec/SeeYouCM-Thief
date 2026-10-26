@@ -171,6 +171,10 @@ Extract all cached configs to disk for offline review:
 ./thief.py --extract-configs ./configs --db custom.db
 ```
 
+Files are written to `./configs/<cucm_host>/<filename>`. Existing files are
+preserved (re-runs are safe and incremental). Only successful downloads
+with non-empty content are extracted.
+
 ### Collect Pages for Unsupported Phone Models
 
 When thief warns about an unknown phone model, collect one network-config page per model so CUCM parsing support can be added:
@@ -182,10 +186,6 @@ When thief warns about an unknown phone model, collect one network-config page p
 ```
 
 Each phone's model is read from its web page; for one phone per model, the Serviceability (or, failing that, `NetworkConfiguration`) page is saved as `cisco-<model>.html` in the current directory and bundled into `ciscophones.tgz` — submit that file. Phones whose config page isn't at a known URL are listed so the page can be saved manually from a browser.
-
-Files are written to `./configs/<cucm_host>/<filename>`. Existing files are
-preserved (re-runs are safe and incremental). Only successful downloads
-with non-empty content are extracted.
 
 Force re-download (bypass cache):
 

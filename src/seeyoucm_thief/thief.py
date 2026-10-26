@@ -3224,6 +3224,7 @@ def query_phone_models(phone_ips, output_dir='.', threads=40):
     unknown ([(phone_ip, model)] whose config page wasn't on a known URL),
     tarball (path, or None when nothing was saved).
     """
+    phone_ips = list(dict.fromkeys(phone_ips))
     workers = max(1, min(threads, len(phone_ips)))
 
     print('[*] Getting phone models...')
@@ -3235,7 +3236,7 @@ def query_phone_models(phone_ips, output_dir='.', threads=40):
     for phone_ip, page in zip(phone_ips, pages):
         model = detect_phone_model(page)
         if model:
-            print(f'{phone_ip},{model}')
+            print(f'[+] {phone_ip}: {model}')
             models.setdefault(model, phone_ip)
 
     result = {'models': models, 'saved': [], 'unknown': [], 'tarball': None}
@@ -3251,7 +3252,7 @@ def query_phone_models(phone_ips, output_dir='.', threads=40):
     for model, phone_ip in models.items():
         page = config_pages[model]
         if page is None:
-            print(f'{phone_ip},{model} not on known page')
+            print(f'[-] {phone_ip}: {model} config page not on a known URL')
             result['unknown'].append((phone_ip, model))
             continue
         filename = f'cisco-{model}.html'
@@ -3520,17 +3521,23 @@ def main():
     # Handle --phone-models (collect per-model config pages and exit). Runs
     # before init_database so falling back to the DB never creates one.
     if args.phone_models:
+        debug = args.debug
         phone_ips = list(args.phone or [])
         if args.gowitness:
             phone_ips.extend(get_phones_from_gowitness(args.gowitness))
-        if not phone_ips and not args.no_db and os.path.exists(args.db):
-            phone_ips = get_phones_from_db(args.db)
-            print(f'[*] Loaded {len(phone_ips)} phone(s) from {args.db}')
+        elif not phone_ips and not args.no_db and os.path.exists(args.db):
+            try:
+                phone_ips = get_phones_from_db(args.db)
+            except sqlite3.Error as e:
+                print(f'[-] Could not read phones from {args.db}: {e}')
+                quit(1)
+            if phone_ips:
+                print(f'[*] Loaded {len(phone_ips)} phone(s) from {args.db}')
         if not phone_ips:
             print('[-] No phone targets: pass -p/--gowitness, or point --db at a database with discovered phones')
             quit(1)
-        query_phone_models(list(dict.fromkeys(phone_ips)), threads=args.threads)
-        quit(0)
+        result = query_phone_models(phone_ips, threads=args.threads)
+        quit(0 if result['models'] else 1)
 
     CUCM_host = args.host
     phones = args.phone if args.phone else []

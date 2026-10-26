@@ -123,3 +123,10 @@ def test_no_models_found(tmp_path, monkeypatch):
     monkeypatch.setattr(thief.requests, 'get', _fake_get({}))
     result = thief.query_phone_models(['10.0.0.1'], output_dir=str(tmp_path))
     assert result == {'models': {}, 'saved': [], 'unknown': [], 'tarball': None}
+
+
+def test_duplicate_ips_fetched_once(tmp_path, monkeypatch):
+    get = _fake_get({'http://10.0.0.1': 'no model'})
+    monkeypatch.setattr(thief.requests, 'get', get)
+    thief.query_phone_models(['10.0.0.1', '10.0.0.1'], output_dir=str(tmp_path))
+    assert get.calls == ['http://10.0.0.1']
