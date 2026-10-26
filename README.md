@@ -159,6 +159,9 @@ View cached results:
 ```bash
 ./thief.py --show-db
 ./thief.py --show-db -H <CUCM Server>  # Filter by CUCM
+./thief.py --credentials                # Only the credentials sections
+./thief.py --usernames                  # Only the usernames section
+./thief.py --credentials --usernames    # Both, without the recon sections
 ```
 
 Extract all cached configs to disk for offline review:
@@ -235,6 +238,8 @@ Export to CSV:
 - `--db FILENAME`: Specify SQLite database for caching results (default: thief.db)
 - `--no-db`: Disable database caching and operate without persistent storage
 - `--show-db`: Display summary of credentials stored in database and exit
+- `--credentials`: Display only the credentials sections of the summary (config credentials, UDS spray hits, verified admin credentials) and exit; implies `--show-db`
+- `--usernames`: Display only the usernames section of the summary and exit; implies `--show-db`
 - `--extract-configs DIR`: Extract all cached configuration files from the database into `DIR/<cucm_host>/<filename>` and exit
 
 ### Debugging

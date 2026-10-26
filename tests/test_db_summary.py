@@ -85,3 +85,74 @@ def test_empty_initialized_db_reports_no_data(tmp_path, capsys):
     thief.display_database_summary(db)
     out = capsys.readouterr().out
     assert 'No data found in database' in out
+
+
+def test_sections_credentials_only(seeded_db, capsys):
+    thief.display_database_summary(seeded_db, sections={'credentials'})
+    out = capsys.readouterr().out
+    assert 'CREDENTIALS FOUND (2 total)' in out
+    assert 'Total credentials discovered: 2' in out
+    assert 'USERNAMES FOUND' not in out
+    assert 'Total usernames discovered' not in out
+    assert 'MAC PREFIXES' not in out
+    assert 'Total download attempts' not in out
+
+
+def test_sections_usernames_only(seeded_db, capsys):
+    thief.display_database_summary(seeded_db, sections={'usernames'})
+    out = capsys.readouterr().out
+    assert 'USERNAMES FOUND (2 total)' in out
+    assert 'carol' in out
+    assert 'CREDENTIALS FOUND' not in out
+    assert 'pw1' not in out
+    assert 'Total credentials discovered' not in out
+    assert 'MAC PREFIXES' not in out
+
+
+def test_sections_both_omits_recon(seeded_db, capsys):
+    thief.display_database_summary(seeded_db, sections={'credentials', 'usernames'})
+    out = capsys.readouterr().out
+    assert 'CREDENTIALS FOUND (2 total)' in out
+    assert 'USERNAMES FOUND (2 total)' in out
+    assert 'MAC PREFIXES' not in out
+    assert 'MAC prefixes discovered' not in out
+
+
+def test_sections_credentials_includes_spray_and_verified(tmp_path, capsys):
+    db = str(tmp_path / 'thief.db')
+    thief.init_database(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO spray_attempts (cucm_host, username, password, status_code, attempt_time)"
+        " VALUES ('cucm-a', 'sprayuser', 'Spring2026!', 200, '2026-10-26 12:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO verification_attempts (cucm_host, username, password, result, attempt_time)"
+        " VALUES ('cucm-a', 'ccmadmin', 'Adm1n!', 'valid', '2026-10-26 12:00:00')"
+    )
+    conn.commit()
+    conn.close()
+    thief.display_database_summary(db, sections={'credentials'})
+    out = capsys.readouterr().out
+    assert 'sprayuser : Spring2026!' in out
+    assert 'ccmadmin : Adm1n!' in out
+    thief.display_database_summary(db, sections={'usernames'})
+    out = capsys.readouterr().out
+    assert 'No data found' in out
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize('flags, expect, reject', [
+    (['--credentials'], 'CREDENTIALS FOUND', 'USERNAMES FOUND'),
+    (['--usernames'], 'USERNAMES FOUND', 'CREDENTIALS FOUND'),
+    (['--show-db', '--usernames'], 'USERNAMES FOUND', 'CREDENTIALS FOUND'),
+])
+def test_cli_section_flags_imply_show_db(seeded_db, capsys, monkeypatch, flags, expect, reject):
+    monkeypatch.setattr('sys.argv', ['thief', *flags, '--db', seeded_db])
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert expect in out
+    assert reject not in out
+    assert 'MAC PREFIXES' not in out
