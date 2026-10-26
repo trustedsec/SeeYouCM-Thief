@@ -321,3 +321,53 @@ class TestUserenumDispatch:
         assert sorted(outfile.read_text().split()) == ['alice', 'bob']
         out = capsys.readouterr().out
         assert 'Logged 2 UDS API usernames to database' in out
+
+
+# ---------------------------------------------------------------------------
+# --phone-models
+# ---------------------------------------------------------------------------
+
+class TestPhoneModelsDispatch:
+    def _capture(self, monkeypatch):
+        seen = {}
+
+        def fake(phone_ips, output_dir='.', threads=40):
+            seen['ips'] = phone_ips
+            seen['threads'] = threads
+            return {'models': {}, 'saved': [], 'unknown': [], 'tarball': None}
+        monkeypatch.setattr(thief, 'query_phone_models', fake)
+        return seen
+
+    def test_uses_phone_args(self, monkeypatch, tmp_path):
+        seen = self._capture(monkeypatch)
+        _argv(monkeypatch, '--phone-models', '-p', '10.0.0.1', '-p', '10.0.0.2',
+              '-T', '7', '--db', str(tmp_path / 'thief.db'))
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 0
+        assert seen == {'ips': ['10.0.0.1', '10.0.0.2'], 'threads': 7}
+        # explicit targets never touch (or create) the db
+        assert not (tmp_path / 'thief.db').exists()
+
+    def test_falls_back_to_db(self, monkeypatch, tmp_path):
+        seen = self._capture(monkeypatch)
+        db = thief.init_database(str(tmp_path / 'thief.db'))
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO phone_cucm (cucm_host, phone_ip, discovery_time) "
+                     "VALUES ('cucm', '10.0.0.5', 't')")
+        conn.commit()
+        conn.close()
+        _argv(monkeypatch, '--phone-models', '--db', db)
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 0
+        assert seen['ips'] == ['10.0.0.5']
+
+    def test_no_targets_exits_1(self, monkeypatch, tmp_path, capsys):
+        self._capture(monkeypatch)
+        _argv(monkeypatch, '--phone-models', '--db', str(tmp_path / 'nope.db'))
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 1
+        assert 'No phone targets' in capsys.readouterr().out
+        assert not (tmp_path / 'nope.db').exists()
