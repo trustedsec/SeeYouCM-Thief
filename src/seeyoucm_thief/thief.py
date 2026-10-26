@@ -674,12 +674,17 @@ def get_cache_list(cucm_host, use_tftp=True):
     dbg(f'Fetching {filename} from {cucm_host} (use_tftp={use_tftp})')
     if use_tftp:
         content = download_config_tftp(cucm_host, filename)
+        method = 'TFTP'
         if content is None:
             content = download_config_http(cucm_host, filename)
+            method = 'HTTP' if content else 'TFTP+HTTP'
     else:
         content = download_config_http(cucm_host, filename)
+        method = 'HTTP'
         if content is None:
             content = download_config_tftp(cucm_host, filename)
+            method = 'TFTP' if content else 'HTTP+TFTP'
+    record_download(cucm_host, filename, content, method)
     if not content:
         dbg(f'ConfigFileCacheList.txt not retrievable from {cucm_host}')
         return []
@@ -2034,6 +2039,7 @@ def search_for_secrets(CUCM_host, filename, use_tftp=True):
         usernames.append(('admin', filename))
         return credentials, usernames
     lines = download_config_tftp(CUCM_host, filename) if use_tftp else download_config_http(CUCM_host, filename)
+    record_download(CUCM_host, filename, lines, 'TFTP' if use_tftp else 'HTTP')
     if lines is None:
         if debug:
             print('Unable to download config file: {0}'.format(filename))
@@ -2448,6 +2454,14 @@ def log_download_attempt(cucm_host, filename, success, method, content=None, db_
             if globals().get('debug', False):
                 print(f'[!] Database error: {str(e)}')
             break
+
+def record_download(cucm_host, filename, content, method):
+    """Log a non-brute-force download to download_attempts using the run's
+    module-level db_file/no_db (set by main()). The -b worker logs its own
+    attempts via log_download_attempt with explicit arguments."""
+    if no_db:
+        return
+    log_download_attempt(cucm_host, filename, content is not None, method, content, db_file)
 
 def log_credentials_to_db(cucm_host, credentials, usernames, db_file='thief.db'):
     """
