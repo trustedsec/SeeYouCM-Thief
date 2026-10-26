@@ -147,6 +147,22 @@ def test_8832_is_a_known_model(capsys):
     assert model == 'CP-8832'
     assert capsys.readouterr().out == ''
 
+def test_8861_cucm():
+    # Picks the node marked Active (listed first here) through the
+    # entity-encoded '-' in the hostname, not the Standby/TFTP rows.
+    with open('tests/cisco-CP-8861.html') as html_file:
+        assert parse_cucm(html_file.read()) == 'cucm-sub1.example.com'
+
+def test_8861_subnet():
+    with open('tests/cisco-CP-8861.html') as html_file:
+        assert parse_subnet(html_file.read()) == '255.255.255.0'
+
+def test_8861_is_a_known_model(capsys):
+    with open('tests/cisco-CP-8861.html') as html_file:
+        model = warn_if_unknown_phone_model(html_file.read())
+    assert model == 'CP-8861'
+    assert capsys.readouterr().out == ''
+
 def test_7811_cucm():
     with open('tests/cisco-CP-7811.html') as html_file:
         assert parse_cucm(html_file.read()) == 'cucm02.example.com'

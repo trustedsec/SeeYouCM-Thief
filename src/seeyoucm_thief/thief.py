@@ -63,7 +63,7 @@ DEFAULT_MAC_SENTINEL = 'DEFAULT'
 # encoding, etc.) that hasn't been verified against the parser.
 KNOWN_PHONE_MODELS = {
     'CP-6921', 'CP-7811', 'CP-7832', 'CP-7841', 'CP-7940G', 'CP-7945G',
-    'CP-8811', 'CP-8832', 'CP-8841', 'CP-8845', 'CP-8851', 'CP-8865', 'CP-8945',
+    'CP-8811', 'CP-8832', 'CP-8841', 'CP-8845', 'CP-8851', 'CP-8861', 'CP-8865', 'CP-8945',
     'CP-DX80',
 }
 # Global variables
