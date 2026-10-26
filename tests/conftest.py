@@ -40,6 +40,16 @@ def _disable_test_mode(request, monkeypatch):
     monkeypatch.setattr(thief, '_TEST_MODE', False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_module_db(tmp_path, monkeypatch):
+    """Point thief's module-level db_file at tmp_path. Download helpers called
+    directly (outside main(), which sets it from --db) log through that global,
+    so without this they would write ./thief.db in the CWD -- possibly a real
+    engagement DB."""
+    monkeypatch.setattr(thief, 'db_file', str(tmp_path / "module-thief.db"))
+    monkeypatch.setattr(thief, 'no_db', False)
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Return a path to a freshly-initialized thief.db in tmp_path."""
