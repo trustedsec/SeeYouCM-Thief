@@ -2616,13 +2616,16 @@ def log_phone_cucm_to_db(cucm_host, phone_ip, db_file='thief.db'):
     except Exception:
         return False
 
-def display_database_summary(db_file='thief.db', cucm_filter=None):
+def display_database_summary(db_file='thief.db', cucm_filter=None, sections=None):
     """
     Display credentials discovery summary from database
-    
+
     Args:
         db_file: Path to SQLite database file
         cucm_filter: Optional CUCM host to filter results (default: show all)
+        sections: Optional set restricting output to 'credentials' (config
+            credentials, UDS spray hits, verified admin credentials) and/or
+            'usernames' (config usernames). None shows every section.
     """
     try:
         if not os.path.exists(db_file):
@@ -2883,7 +2886,15 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
                 raise
 
         conn.close()
-        
+
+        if sections is not None:
+            if 'credentials' not in sections:
+                credentials, spray_hits, verified_admins = [], [], []
+            if 'usernames' not in sections:
+                usernames = []
+            mac_prefixes, phone_cucm, cluster_servers = [], [], []
+            uds_devices, admin_devices, uds_directory = [], [], []
+
         if not credentials and not usernames and not mac_prefixes and not phone_cucm and not cluster_servers and not spray_hits and not uds_devices and not uds_directory and not verified_admins and not admin_devices:
             print(f'\n[-] No data found in database')
             if cucm_filter:
@@ -3027,8 +3038,9 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
 
         print(f'\n{"="*70}')
         print(f'\n\033[1mDATABASE STATISTICS:\033[0m')
-        print(f'  • Total download attempts:      {total_attempts}')
-        print(f'  • Successful downloads:         {successful_downloads}')
+        if sections is None:
+            print(f'  • Total download attempts:      {total_attempts}')
+            print(f'  • Successful downloads:         {successful_downloads}')
         if mac_prefixes:
             print(f'  • MAC prefixes discovered:      {len(mac_prefixes)}')
             unique_prefixes = len(set(p[3] for p in mac_prefixes))
@@ -3039,8 +3051,10 @@ def display_database_summary(db_file='thief.db', cucm_filter=None):
             print(f'  • Devices with credentials:     {len(devices_with_creds)}')
         if usernames:
             print(f'  • Devices with usernames only:  {len(devices_with_users)}')
-        print(f'  • Total credentials discovered: {len(credentials)}')
-        print(f'  • Total usernames discovered:   {len(usernames)}')
+        if sections is None or 'credentials' in sections:
+            print(f'  • Total credentials discovered: {len(credentials)}')
+        if sections is None or 'usernames' in sections:
+            print(f'  • Total usernames discovered:   {len(usernames)}')
         print("="*70)
         
     except sqlite3.Error as e:
@@ -3306,12 +3320,19 @@ def main():
     parser.add_argument('--db', type=str, metavar='FILENAME', default='thief.db', help='Specify SQLite database for caching results (default: thief.db)')
     parser.add_argument('--no-db', action='store_true', default=False, help='Disable database caching and operate without persistent storage')
     parser.add_argument('--show-db', action='store_true', default=False, help='Display summary of credentials stored in database and exit')
+    parser.add_argument('--credentials', action='store_true', default=False, help='Display only the credentials sections of the database summary (config credentials, UDS spray hits, verified admin credentials) and exit; implies --show-db')
+    parser.add_argument('--usernames', action='store_true', default=False, help='Display only the usernames section of the database summary and exit; implies --show-db')
     parser.add_argument('--extract-configs', type=str, metavar='DIR', default=None, help='Extract all cached configuration files from the database into DIR/<cucm_host>/<filename> and exit')
 
     # Debugging
     parser.add_argument('-d','--debug', action='store_true', default=False, help='Enable verbose output including all failed attempts and TFTP operations')
 
     args = parser.parse_args()
+
+    # --credentials / --usernames restrict the --show-db summary to those sections
+    show_sections = {name for name in ('credentials', 'usernames') if getattr(args, name)} or None
+    if show_sections:
+        args.show_db = True
 
     # Handle --show-db early (display database summary and exit)
     if args.show_db:
@@ -3370,7 +3391,7 @@ def main():
                         raise
             except Exception as e:
                 print(f'[-] Error exporting credentials to CSV: {e}')
-        display_database_summary(db_file, cucm_filter)
+        display_database_summary(db_file, cucm_filter, sections=show_sections)
         quit(0)
 
     # Handle --extract-configs (dump cached configs to disk and exit)
