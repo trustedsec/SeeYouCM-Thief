@@ -12,6 +12,7 @@ import tempfile
 import logging
 import csv
 import sqlite3
+import tarfile
 import time
 import threading
 import queue
@@ -302,8 +303,8 @@ def warn_if_unknown_phone_model(page):
     model = detect_phone_model(page)
     if model and model not in KNOWN_PHONE_MODELS:
         print(f'[!] Unknown phone model {model} - CUCM hostname parsing may be '
-              f'inaccurate. Run cisco-phone-query.sh against this phone and submit '
-              f'the generated cisco-{model}.html so support can be added.')
+              f'inaccurate. Run `thief --phone-models -p <phone>` against this phone and '
+              f'submit the generated cisco-{model}.html so support can be added.')
     return model
 
 
@@ -3175,6 +3176,111 @@ def device_key_for_result(full_mac, filename):
     return f'SEP{full_mac}'
 
 
+PHONE_MODEL_PAGES = (
+    '/CGI/Java/Serviceability?adapter=device.statistics.device',
+    '/NetworkConfiguration',
+)
+PHONE_MODEL_PAGE_MARKER = re.compile(r'CUCM Server|Unified CM', re.IGNORECASE)
+PHONE_MODELS_TARBALL = 'ciscophones.tgz'
+
+
+def get_phones_from_db(db_file):
+    """Return the distinct phone IPs recorded in the thief DB (phone_cucm and
+    mac_prefixes), sorted. Raises FileNotFoundError if db_file does not exist."""
+    if not os.path.exists(db_file):
+        raise FileNotFoundError(f'Database file not found: {db_file}')
+    with closing(sqlite3.connect(f'file:{db_file}?mode=ro', uri=True)) as conn:
+        rows = conn.execute(
+            'SELECT phone_ip FROM phone_cucm UNION SELECT phone_ip FROM mac_prefixes'
+        ).fetchall()
+    return sorted(row[0] for row in rows)
+
+
+def _fetch_phone_page(url):
+    dbg(f'Phone models: GET {url}')
+    try:
+        return requests.get(url, verify=False, timeout=3).text
+    except Exception as e:
+        dbg(f'Phone models: {url} raised {type(e).__name__}: {e}')
+        return None
+
+
+def _fetch_model_config_page(phone_ip):
+    """Return the first known config page on phone_ip that names its CUCM."""
+    for path in PHONE_MODEL_PAGES:
+        page = _fetch_phone_page(f'http://{phone_ip}{path}')
+        if page and PHONE_MODEL_PAGE_MARKER.search(page):
+            return page
+    return None
+
+
+def query_phone_models(phone_ips, output_dir='.', threads=40):
+    """Identify each phone's model, then save one network-config page per
+    model as output_dir/cisco-<model>.html and bundle them into
+    ciscophones.tgz. These pages are what's needed to add parse_cucm support
+    for phone models not in KNOWN_PHONE_MODELS.
+
+    Returns a dict: models ({model: phone_ip used}), saved (filenames written),
+    unknown ([(phone_ip, model)] whose config page wasn't on a known URL),
+    tarball (path, or None when nothing was saved).
+    """
+    phone_ips = list(dict.fromkeys(phone_ips))
+    workers = max(1, min(threads, len(phone_ips)))
+
+    print('[*] Getting phone models...')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        pages = list(executor.map(lambda ip: _fetch_phone_page(f'http://{ip}'), phone_ips))
+
+    # First phone listed wins for each model; soft phones (no CP- model) are skipped.
+    models = {}
+    for phone_ip, page in zip(phone_ips, pages):
+        model = detect_phone_model(page)
+        if model:
+            print(f'[+] {phone_ip}: {model}')
+            models.setdefault(model, phone_ip)
+
+    result = {'models': models, 'saved': [], 'unknown': [], 'tarball': None}
+    if not models:
+        print('[-] No Cisco phone models identified')
+        return result
+
+    print(f'[*] Downloading network config pages for {len(models)} unique model(s)')
+    os.makedirs(output_dir, exist_ok=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(models))) as executor:
+        config_pages = dict(zip(models, executor.map(_fetch_model_config_page, models.values())))
+
+    for model, phone_ip in models.items():
+        page = config_pages[model]
+        if page is None:
+            print(f'[-] {phone_ip}: {model} config page not on a known URL')
+            result['unknown'].append((phone_ip, model))
+            continue
+        filename = f'cisco-{model}.html'
+        with open(os.path.join(output_dir, filename), 'w', encoding='utf-8') as f:
+            f.write(page)
+        result['saved'].append(filename)
+
+    if result['saved']:
+        tarball = os.path.join(output_dir, PHONE_MODELS_TARBALL)
+        with tarfile.open(tarball, 'w:gz') as tar:
+            for filename in result['saved']:
+                tar.add(os.path.join(output_dir, filename), arcname=filename)
+        result['tarball'] = tarball
+
+    if result['unknown']:
+        print('[!] Found phones with unknown network config URI')
+        print('    Browse to the following phone webpage(s) & click [Network Setup] to verify URL')
+        print('    File > Save As: cisco-<model>.html, and note the actual URI when submitting')
+        for phone_ip, model in result['unknown']:
+            print(f'    http://{phone_ip} ({model})')
+        if result['tarball']:
+            print(f'    Also include {result["tarball"]} when submitting')
+    elif result['tarball']:
+        print(f'[*] Submit the following file: {result["tarball"]}')
+
+    return result
+
+
 def extract_configs_from_db(db_file, output_dir, debug=False):
     """Read successful download rows from the cache and materialize them
     as files under output_dir/<cucm_host>/<filename>.
@@ -3322,6 +3428,7 @@ def main():
     parser.add_argument('--show-db', action='store_true', default=False, help='Display summary of credentials stored in database and exit')
     parser.add_argument('--credentials', action='store_true', default=False, help='Display only the credentials sections of the database summary (config credentials, UDS spray hits, verified admin credentials) and exit; implies --show-db')
     parser.add_argument('--usernames', action='store_true', default=False, help='Display only the usernames section of the database summary and exit; implies --show-db')
+    parser.add_argument('--phone-models', action='store_true', default=False, help='Save one network-config page per Cisco phone model (cisco-<model>.html + ciscophones.tgz) for adding support for new models, and exit. Targets come from -p/--gowitness, else from phone IPs in --db')
     parser.add_argument('--extract-configs', type=str, metavar='DIR', default=None, help='Extract all cached configuration files from the database into DIR/<cucm_host>/<filename> and exit')
 
     # Debugging
@@ -3410,6 +3517,27 @@ def main():
         # Per spec: exit 1 if any row failed to write. Empty DB (0 rows, 0
         # errors) is a legitimate clean exit.
         quit(1 if errors > 0 else 0)
+
+    # Handle --phone-models (collect per-model config pages and exit). Runs
+    # before init_database so falling back to the DB never creates one.
+    if args.phone_models:
+        debug = args.debug
+        phone_ips = list(args.phone or [])
+        if args.gowitness:
+            phone_ips.extend(get_phones_from_gowitness(args.gowitness))
+        elif not phone_ips and not args.no_db and os.path.exists(args.db):
+            try:
+                phone_ips = get_phones_from_db(args.db)
+            except sqlite3.Error as e:
+                print(f'[-] Could not read phones from {args.db}: {e}')
+                quit(1)
+            if phone_ips:
+                print(f'[*] Loaded {len(phone_ips)} phone(s) from {args.db}')
+        if not phone_ips:
+            print('[-] No phone targets: pass -p/--gowitness, or point --db at a database with discovered phones')
+            quit(1)
+        result = query_phone_models(phone_ips, threads=args.threads)
+        quit(0 if result['models'] else 1)
 
     CUCM_host = args.host
     phones = args.phone if args.phone else []

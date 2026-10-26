@@ -241,7 +241,7 @@ def test_warn_if_unknown_phone_model_unverified_model_flags(capsys):
     assert model == 'CP-8831'
     out = capsys.readouterr().out
     assert 'Unknown phone model CP-8831' in out
-    assert 'cisco-phone-query.sh' in out
+    assert 'thief --phone-models -p' in out
 
 def test_known_phone_models_matches_fixtures():
     assert 'CP-8831' not in KNOWN_PHONE_MODELS

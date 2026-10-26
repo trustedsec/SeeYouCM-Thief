@@ -175,6 +175,18 @@ Files are written to `./configs/<cucm_host>/<filename>`. Existing files are
 preserved (re-runs are safe and incremental). Only successful downloads
 with non-empty content are extracted.
 
+### Collect Pages for Unsupported Phone Models
+
+When thief warns about an unknown phone model, collect one network-config page per model so CUCM parsing support can be added:
+
+```bash
+./thief.py --phone-models                     # every phone IP already in thief.db
+./thief.py --phone-models -p 10.0.0.5 -p 10.0.0.6
+./thief.py --phone-models --gowitness /path/to/gowitness.sqlite3
+```
+
+Each phone's model is read from its web page; for one phone per model, the Serviceability (or, failing that, `NetworkConfiguration`) page is saved as `cisco-<model>.html` in the current directory and bundled into `ciscophones.tgz` — submit that file. Phones whose config page isn't at a known URL are listed so the page can be saved manually from a browser.
+
 Force re-download (bypass cache):
 
 ```bash
@@ -241,6 +253,7 @@ Export to CSV:
 - `--credentials`: Display only the credentials sections of the summary (config credentials, UDS spray hits, verified admin credentials) and exit; implies `--show-db`
 - `--usernames`: Display only the usernames section of the summary and exit; implies `--show-db`
 - `--extract-configs DIR`: Extract all cached configuration files from the database into `DIR/<cucm_host>/<filename>` and exit
+- `--phone-models`: Save one network-config page per phone model (`cisco-<model>.html` + `ciscophones.tgz`) and exit; uses `-p`/`--gowitness` targets, else phone IPs from `--db`
 
 ### Debugging
 - `-d, --debug`: Enable verbose output including all failed attempts and TFTP operations
