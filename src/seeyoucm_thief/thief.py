@@ -59,13 +59,17 @@ DEFAULT_TFTP_FILES = (
 # Sentinel used in the full_mac slot of brute-force candidate tuples to
 # identify default-file tasks (not associated with a specific device MAC).
 DEFAULT_MAC_SENTINEL = 'DEFAULT'
-# Phone models whose status-page layout has a test fixture backing parse_cucm.
+# Phone models whose status-page layout is verified against parse_cucm.
 # Models outside this set may use a page layout (field labels, HTML-entity
 # encoding, etc.) that hasn't been verified against the parser.
 KNOWN_PHONE_MODELS = {
     'CP-6921', 'CP-7811', 'CP-7832', 'CP-7841', 'CP-7940G', 'CP-7945G',
-    'CP-8811', 'CP-8832', 'CP-8841', 'CP-8845', 'CP-8851', 'CP-8865', 'CP-8945',
+    'CP-8811', 'CP-8832', 'CP-8841', 'CP-8845', 'CP-8851', 'CP-8861', 'CP-8865', 'CP-8945',
     'CP-DX80',
+    # No fixture of their own, but they run the same firmware load (and so
+    # render the same status page) as fixture-backed models: sip78xx like
+    # the 7811/7841, and the no-radio builds of the sip88xx 8851/8865.
+    'CP-7821', 'CP-7861', 'CP-8851NR', 'CP-8865NR',
 }
 # Global variables
 debug = False

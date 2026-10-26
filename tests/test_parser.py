@@ -1,4 +1,5 @@
 #!/usr/env python3
+import pytest
 from thief import parse_cucm, parse_subnet, parse_filename, detect_phone_model, warn_if_unknown_phone_model, KNOWN_PHONE_MODELS, parse_status_table
 
 def test_status_table_basic_row():
@@ -147,6 +148,22 @@ def test_8832_is_a_known_model(capsys):
     assert model == 'CP-8832'
     assert capsys.readouterr().out == ''
 
+def test_8861_cucm():
+    # Picks the node marked Active (listed first here) through the
+    # entity-encoded '-' in the hostname, not the Standby/TFTP rows.
+    with open('tests/cisco-CP-8861.html') as html_file:
+        assert parse_cucm(html_file.read()) == 'cucm-sub1.example.com'
+
+def test_8861_subnet():
+    with open('tests/cisco-CP-8861.html') as html_file:
+        assert parse_subnet(html_file.read()) == '255.255.255.0'
+
+def test_8861_is_a_known_model(capsys):
+    with open('tests/cisco-CP-8861.html') as html_file:
+        model = warn_if_unknown_phone_model(html_file.read())
+    assert model == 'CP-8861'
+    assert capsys.readouterr().out == ''
+
 def test_7811_cucm():
     with open('tests/cisco-CP-7811.html') as html_file:
         assert parse_cucm(html_file.read()) == 'cucm02.example.com'
@@ -248,3 +265,8 @@ def test_known_phone_models_matches_fixtures():
     assert 'CP-7811' in KNOWN_PHONE_MODELS
     assert 'CP-8832' in KNOWN_PHONE_MODELS
 
+@pytest.mark.parametrize('model', ['CP-7821', 'CP-7861', 'CP-8851NR', 'CP-8865NR'])
+def test_same_firmware_sibling_models_are_known(model, capsys):
+    page = f'<html>Cisco IP Phone {model} ( SEP001122334455 )</html>'
+    assert warn_if_unknown_phone_model(page) == model
+    assert capsys.readouterr().out == ''
