@@ -3372,8 +3372,9 @@ def extract_configs_from_db(db_file, output_dir, debug=False):
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
-    # Show banner before parsing arguments so it displays with --help
-    banner()
+    # Show banner unless --no-cool-art is passed
+    if '--no-cool-art' not in sys.argv:
+        banner()
 
     from seeyoucm_thief import __version__
     parser = argparse.ArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
@@ -3437,6 +3438,7 @@ def main():
 
     # Debugging
     parser.add_argument('-d','--debug', action='store_true', default=False, help='Enable verbose output including all failed attempts and TFTP operations')
+    parser.add_argument('--no-cool-art', action='store_true', default=False, help='Suppress the ASCII art banner')
 
     args = parser.parse_args()
 
