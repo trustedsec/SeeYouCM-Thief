@@ -169,10 +169,26 @@ def test_enumsubnet_detects_cucm_for_each_phone(leaves, monkeypatch, tmp_path):
     assert rows == [('cucm-a.test', 'cucm-a.test'), ('cucm-b.test', 'cucm-b.test')]
 
 
+def test_enumsubnet_reuses_cucm_parsed_during_discovery(leaves, monkeypatch, tmp_path):
+    hosts = [{'ip': '10.0.0.5', 'hostname': 'SEP000000000005',
+              'cucm': 'parsed-cucm.test'}]
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone',
+                        lambda ip: pytest.fail('must not fetch the phone page twice'))
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda host: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--db', str(tmp_path / 'thief.db'))
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert leaves['config_names'] == [('parsed-cucm.test', ['SEP000000000005'])]
+
+
 def test_enumsubnet_explicit_host_is_used_for_each_phone(leaves, monkeypatch, tmp_path):
     hosts = [
-        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005'},
-        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006'},
+        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005', 'cucm': 'parsed-a.test'},
+        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006', 'cucm': 'parsed-b.test'},
     ]
     monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
     monkeypatch.setattr(thief, 'get_cucm_name_from_phone',
