@@ -305,6 +305,37 @@ def test_enumsubnet_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
     assert seen == [False]
 
 
+def test_two_unreadable_phones_share_cucm_cache_and_search_once(monkeypatch, tmp_path):
+    cache_calls = []
+    searched = []
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda ip: 'cucm.test')
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda ip: None)
+    monkeypatch.setattr(thief, 'get_phones_hostnames_from_reverse', lambda ip: [])
+
+    def cache_list(cucm, use_tftp=True):
+        cache_calls.append((cucm, use_tftp))
+        return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+    def search(cucm, filename, use_tftp=True):
+        searched.append((cucm, filename))
+        return ([], [])
+
+    monkeypatch.setattr(thief, 'get_cache_list', cache_list)
+    monkeypatch.setattr(thief, 'search_for_secrets', search)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-p', '10.0.0.6', '-T', '2',
+          '--no-db', '--db', str(tmp_path / 'thief.db'))
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert cache_calls == [('cucm.test', True)]
+    assert sorted(searched) == sorted(
+        [('cucm.test', name) for name in
+         ['SEPAAAAAAAAAAAA.cnf.xml', *thief.DEFAULT_TFTP_FILES]]
+    )
+
+
 def test_phone_with_unreadable_hostname_uses_cache_list_http(monkeypatch, tmp_path, capsys):
     """Test B: -p with unreadable hostname falls back to cache list over HTTP (#59)."""
     cache_list_calls = []
