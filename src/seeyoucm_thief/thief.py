@@ -3369,15 +3369,24 @@ def extract_configs_from_db(db_file, output_dir, debug=False):
     return written, skipped, errors
 
 
+class _BannerArgumentParser(argparse.ArgumentParser):
+    """Show the banner only on --help or an argument error, not on normal runs."""
+
+    def print_help(self, file=None):
+        banner()
+        super().print_help(file)
+
+    def error(self, message):
+        banner()
+        sys.stdout.flush()  # keep the banner ahead of the stderr usage message when piped
+        super().error(message)
+
+
 def main():
     global debug, found_credentials, found_usernames, file_names, hostnames, db_file, no_db, force_download
     
-    # Show banner unless --no-cool-art is passed
-    if '--no-cool-art' not in sys.argv:
-        banner()
-
     from seeyoucm_thief import __version__
-    parser = argparse.ArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
+    parser = _BannerArgumentParser(description='Penetration toolkit for extracting credentials from Cisco phone systems')
     parser.add_argument('-V', '--version', action='version', version=f'%(prog)s {__version__}')
 
     # Target Specification
@@ -3438,7 +3447,6 @@ def main():
 
     # Debugging
     parser.add_argument('-d','--debug', action='store_true', default=False, help='Enable verbose output including all failed attempts and TFTP operations')
-    parser.add_argument('--no-cool-art', action='store_true', default=False, help='Suppress the ASCII art banner')
 
     args = parser.parse_args()
 
