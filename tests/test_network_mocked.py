@@ -361,6 +361,7 @@ class TestEnumeratePhonesSubnet:
         assert len(result) == 2
         assert result[0]['hostname'] == 'SEP001122334455'
         assert 'cucm1.example.com' in result[0]['url']
+        assert result[0]['cucm'] == 'cucm1.example.com'
         assert ':6970/' in result[0]['url']
 
     def test_skips_unreachable_hosts(self, monkeypatch):

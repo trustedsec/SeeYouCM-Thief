@@ -169,10 +169,26 @@ def test_enumsubnet_detects_cucm_for_each_phone(leaves, monkeypatch, tmp_path):
     assert rows == [('cucm-a.test', 'cucm-a.test'), ('cucm-b.test', 'cucm-b.test')]
 
 
+def test_enumsubnet_reuses_cucm_parsed_during_discovery(leaves, monkeypatch, tmp_path):
+    hosts = [{'ip': '10.0.0.5', 'hostname': 'SEP000000000005',
+              'cucm': 'parsed-cucm.test'}]
+    monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone',
+                        lambda ip: pytest.fail('must not fetch the phone page twice'))
+    monkeypatch.setattr(thief.socket, 'gethostbyname', lambda host: '10.0.0.1')
+    _argv(monkeypatch, '-e', '10.0.0.0/30', '--db', str(tmp_path / 'thief.db'))
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert leaves['config_names'] == [('parsed-cucm.test', ['SEP000000000005'])]
+
+
 def test_enumsubnet_explicit_host_is_used_for_each_phone(leaves, monkeypatch, tmp_path):
     hosts = [
-        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005'},
-        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006'},
+        {'ip': '10.0.0.5', 'hostname': 'SEP000000000005', 'cucm': 'parsed-a.test'},
+        {'ip': '10.0.0.6', 'hostname': 'SEP000000000006', 'cucm': 'parsed-b.test'},
     ]
     monkeypatch.setattr(thief, 'enumerate_phones_subnet', lambda cidr: hosts)
     monkeypatch.setattr(thief, 'get_cucm_name_from_phone',
@@ -287,6 +303,37 @@ def test_enumsubnet_passes_http_to_config_names(leaves, monkeypatch, tmp_path):
         thief.main()
     assert exc.value.code == 0
     assert seen == [False]
+
+
+def test_two_unreadable_phones_share_cucm_cache_and_search_once(monkeypatch, tmp_path):
+    cache_calls = []
+    searched = []
+    monkeypatch.setattr(thief, 'get_cucm_name_from_phone', lambda ip: 'cucm.test')
+    monkeypatch.setattr(thief, 'get_hostname_from_phone', lambda ip: None)
+    monkeypatch.setattr(thief, 'get_phones_hostnames_from_reverse', lambda ip: [])
+
+    def cache_list(cucm, use_tftp=True):
+        cache_calls.append((cucm, use_tftp))
+        return ['SEPAAAAAAAAAAAA.cnf.xml']
+
+    def search(cucm, filename, use_tftp=True):
+        searched.append((cucm, filename))
+        return ([], [])
+
+    monkeypatch.setattr(thief, 'get_cache_list', cache_list)
+    monkeypatch.setattr(thief, 'search_for_secrets', search)
+    _argv(monkeypatch, '-p', '10.0.0.5', '-p', '10.0.0.6', '-T', '2',
+          '--no-db', '--db', str(tmp_path / 'thief.db'))
+
+    with pytest.raises(SystemExit) as exc:
+        thief.main()
+
+    assert exc.value.code == 0
+    assert cache_calls == [('cucm.test', True)]
+    assert sorted(searched) == sorted(
+        [('cucm.test', name) for name in
+         ['SEPAAAAAAAAAAAA.cnf.xml', *thief.DEFAULT_TFTP_FILES]]
+    )
 
 
 def test_phone_with_unreadable_hostname_uses_cache_list_http(monkeypatch, tmp_path, capsys):
