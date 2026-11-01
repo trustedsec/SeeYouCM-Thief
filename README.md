@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/banner.png" alt="SeeYouCM-Thief" width="100%">
+</p>
+
 # SeeYouCM Thief
 
 ![Tests](https://github.com/trustedsec/SeeYouCM-Thief/actions/workflows/pytest.yaml/badge.svg)
