@@ -769,6 +769,11 @@ def _parse_uds_users_wrapper(body):
     return found
 
 
+# One userPolicy probe per (host, port) per run: --userenum walks /users twice
+# (usernames, then directory records) and the limit does not change mid-run.
+_uds_search_limit_cache = {}
+
+
 def get_uds_search_limit(cucm_host, port=UDS_PORT, timeout=10):
     """Return the UDS UserSearchLimit: the most users one /users page can hold.
 
@@ -776,10 +781,18 @@ def get_uds_search_limit(cucm_host, port=UDS_PORT, timeout=10):
     readable without credentials, with a range of 1-500 and a default of 64.
     Any failure returns UDS_DEFAULT_PAGE_SIZE, which is what CUCM uses when
     `max` is omitted, so a server that does not answer still pages exactly as
-    before (#34)."""
+    before (#34). The result (including the default after a failure) is cached
+    per (host, port) for the rest of the run."""
     if _TEST_MODE:
         return UDS_DEFAULT_PAGE_SIZE
+    key = (cucm_host, port)
+    if key not in _uds_search_limit_cache:
+        _uds_search_limit_cache[key] = _probe_uds_search_limit(cucm_host, port, timeout)
+    return _uds_search_limit_cache[key]
 
+
+def _probe_uds_search_limit(cucm_host, port, timeout):
+    """Fetch and parse UserSearchLimit; see get_uds_search_limit."""
     url = f'https://{cucm_host}:{port}/cucm-uds/options/userPolicy'
     dbg(f'UDS GET {url} (timeout={timeout}s)')
     try:
@@ -848,24 +861,22 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
         dbg(f'UDS {next_url} -> {resp.status_code} ({len(resp.content)} bytes)')
         if resp.status_code != 200:
             dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
+            page_count = 0
+        else:
+            page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
+            dbg(f'UDS page {pages} parsed {page_count} userName entries')
+            if page_count == 0:
+                dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
+        if page_count == 0:
             if base != plain_base and collected == 0:
                 # Cisco says max must be "less than" UserSearchLimit; a server
-                # that reads that strictly rejects max=limit. Fall back to the
-                # default page size rather than returning nothing.
-                dbg(f'UDS rejected max={page_size}; retrying without max')
-                base = plain_base
-                next_url = base
-                continue
-            break
-
-        page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
-        dbg(f'UDS page {pages} parsed {page_count} userName entries')
-        if page_count == 0:
-            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
-            if base != plain_base and collected == 0:
-                # A server may reject max=limit with an empty 200 instead of
-                # an error status; fall back the same way as the non-200 case.
-                dbg(f'UDS returned no users for max={page_size}; retrying without max')
+                # that reads that strictly rejects max=limit, with an error
+                # status or an empty 200. Fall back to the default page size
+                # rather than returning nothing, and say so, since the walk
+                # is now slower (#34).
+                reason = f'HTTP {resp.status_code}' if resp.status_code != 200 else 'empty page'
+                print(f'[!] UDS did not accept max={page_size} ({reason}); '
+                      f'continuing at the default {UDS_DEFAULT_PAGE_SIZE} users per page.')
                 base = plain_base
                 next_url = base
                 continue

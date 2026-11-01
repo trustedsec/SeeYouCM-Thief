@@ -42,6 +42,13 @@ def _disable_test_mode(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_uds_search_limit_cache(monkeypatch):
+    """get_uds_search_limit caches per (host, port) for the life of the
+    process; give every test an empty cache so results never leak."""
+    monkeypatch.setattr(thief, '_uds_search_limit_cache', {})
+
+
+@pytest.fixture(autouse=True)
 def _isolate_module_db(tmp_path, monkeypatch):
     """Point thief's module-level db_file at tmp_path. Download helpers called
     directly (outside main(), which sets it from --db) log through that global,

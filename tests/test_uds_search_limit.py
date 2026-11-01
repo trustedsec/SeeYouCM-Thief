@@ -76,6 +76,20 @@ class TestGetUdsSearchLimit:
             assert thief.get_uds_search_limit('cucm.example.com', 8443) == thief.UDS_DEFAULT_PAGE_SIZE
         get.assert_not_called()
 
+    def test_caches_per_host_and_port(self):
+        with patch.object(thief.requests, 'get', return_value=_resp(_policy_body(200))) as get:
+            assert thief.get_uds_search_limit('cucm.example.com', 8443) == 200
+            assert thief.get_uds_search_limit('cucm.example.com', 8443) == 200
+            assert get.call_count == 1
+            thief.get_uds_search_limit('cucm.example.com', 9443)
+            assert get.call_count == 2
+
+    def test_caches_the_default_after_a_failure(self):
+        with patch.object(thief.requests, 'get', side_effect=thief.requests.ConnectionError('boom')) as get:
+            thief.get_uds_search_limit('cucm.example.com', 8443)
+            assert thief.get_uds_search_limit('cucm.example.com', 8443) == thief.UDS_DEFAULT_PAGE_SIZE
+        assert get.call_count == 1
+
 
 # ---------------------------------------------------------------------------
 # _iter_uds_user_pages page-size wiring
@@ -143,7 +157,7 @@ def test_omits_max_when_limit_is_below_default(monkeypatch):
     assert 'max=' not in urls[0]
 
 
-def test_retries_first_page_without_max_when_server_rejects_it(monkeypatch):
+def test_retries_first_page_without_max_when_server_rejects_it(monkeypatch, capsys):
     monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 500)
     directory = [f'user{i:03d}' for i in range(100)]
     urls = []
@@ -162,9 +176,13 @@ def test_retries_first_page_without_max_when_server_rejects_it(monkeypatch):
     assert urls[0] == 'https://cucm.example.com:8443/cucm-uds/users?max=500'
     assert urls[1] == 'https://cucm.example.com:8443/cucm-uds/users'
     assert all('max=' not in u for u in urls[1:])
+    out = capsys.readouterr().out
+    assert '[!] UDS did not accept max=500' in out
+    assert f'continuing at the default {thief.UDS_DEFAULT_PAGE_SIZE} users per page' in out
+    assert 'HTTP 400' in out
 
 
-def test_retries_first_page_without_max_when_server_returns_empty_200(monkeypatch):
+def test_retries_first_page_without_max_when_server_returns_empty_200(monkeypatch, capsys):
     monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 500)
     directory = [f'user{i:03d}' for i in range(100)]
     urls = []
@@ -183,6 +201,10 @@ def test_retries_first_page_without_max_when_server_returns_empty_200(monkeypatc
     assert urls[0] == 'https://cucm.example.com:8443/cucm-uds/users?max=500'
     assert urls[1] == 'https://cucm.example.com:8443/cucm-uds/users'
     assert all('max=' not in u for u in urls[1:])
+    out = capsys.readouterr().out
+    assert '[!] UDS did not accept max=500' in out
+    assert f'continuing at the default {thief.UDS_DEFAULT_PAGE_SIZE} users per page' in out
+    assert 'empty page' in out
 
 
 def test_pager_probes_limit_with_same_host_port_timeout(monkeypatch):
@@ -211,3 +233,30 @@ def test_shortfall_warning_explains_user_search_limit(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert 'UDS reports 10 matching users but only 2 were retrieved' in out
     assert 'UserSearchLimit' in out
+
+
+def test_userenum_probes_once_and_pages_at_the_served_limit():
+    """End to end: a real userPolicy body drives max= on both directory walks
+    that --userenum makes, and the probe is fetched only once."""
+    directory = [f'user{i:04d}' for i in range(600)]
+    urls = []
+    serve = _fake_users_server(directory, 500, urls)
+
+    def side_effect(url, **kwargs):
+        if url.endswith('/cucm-uds/options/userPolicy'):
+            urls.append(url)
+            return _resp(_policy_body(500))
+        return serve(url, **kwargs)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        users = thief.get_users_api('cucm.example.com', 8443)
+        records = thief.get_user_directory_api('cucm.example.com', 8443)
+
+    assert users == directory
+    assert [r['username'] for r in records] == directory
+    assert [u for u in urls if u.endswith('/userPolicy')] == [
+        'https://cucm.example.com:8443/cucm-uds/options/userPolicy']
+    assert [u for u in urls if '/cucm-uds/users' in u] == [
+        'https://cucm.example.com:8443/cucm-uds/users?max=500',
+        'https://cucm.example.com:8443/cucm-uds/users?max=500&start=500',
+    ] * 2
