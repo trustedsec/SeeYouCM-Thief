@@ -721,14 +721,12 @@ def get_config_names(cucm_host, hostnames=None, use_tftp=True):
         for host in hostnames:
             if not host:
                 continue
-            # Always use only the base hostname (strip domain if present)
+            # Keep only the base hostname: everything after the first dot goes,
+            # which strips a domain and an already-present .cnf.xml alike.
             name = host.strip().split('.')[0]
             if not name:
                 continue
-            if name.lower().endswith('.cnf.xml'):
-                _add(name)
-            else:
-                _add(f'{name}.cnf.xml')
+            _add(f'{name}.cnf.xml')
     elif cucm_host:
         # No hostnames provided — fall back to ConfigFileCacheList.txt for full
         # enumeration of every device config the CUCM TFTP service has cached.
