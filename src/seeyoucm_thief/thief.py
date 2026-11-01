@@ -40,6 +40,10 @@ HTTP_TFTP_PORT = 6970
 # the CUCM major version.
 UDS_PORT = 8443
 UDS_PORT_SECURE = 9443
+# /cucm-uds/users page size. CUCM returns 64 users per page when `max` is
+# omitted; the UserSearchLimit enterprise parameter allows up to 500 (#34).
+UDS_DEFAULT_PAGE_SIZE = 64
+UDS_MAX_PAGE_SIZE = 500
 # Default output file for the standalone --directory harvest
 DEFAULT_DIRECTORY_OUTFILE = 'cucm_directory.csv'
 # Well-known default filenames the CUCM TFTP service hosts in addition to
@@ -763,6 +767,41 @@ def _parse_uds_users_wrapper(body):
         if am:
             found[name] = int(am.group(1))
     return found
+
+
+def get_uds_search_limit(cucm_host, port=UDS_PORT, timeout=10):
+    """Return the UDS UserSearchLimit: the most users one /users page can hold.
+
+    Cisco documents the enterprise parameter at /cucm-uds/options/userPolicy,
+    readable without credentials, with a range of 1-500 and a default of 64.
+    Any failure returns UDS_DEFAULT_PAGE_SIZE, which is what CUCM uses when
+    `max` is omitted, so a server that does not answer pages exactly as
+    before (#34)."""
+    if _TEST_MODE:
+        return UDS_DEFAULT_PAGE_SIZE
+
+    url = f'https://{cucm_host}:{port}/cucm-uds/options/userPolicy'
+    dbg(f'UDS GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
+        return UDS_DEFAULT_PAGE_SIZE
+    if resp.status_code != 200:
+        dbg(f'UDS {url} -> {resp.status_code}; using default page size')
+        return UDS_DEFAULT_PAGE_SIZE
+
+    # Pick the <policy> by its <name>; the wrapper element is undocumented.
+    for block in re.findall(r'<policy\b[^>]*>(.*?)</policy>', resp.text, re.DOTALL):
+        if not re.search(r'<name>\s*UserSearchLimit\s*</name>', block):
+            continue
+        m = re.search(r'<value>\s*(\d+)\s*</value>', block)
+        if m:
+            limit = max(1, min(int(m.group(1)), UDS_MAX_PAGE_SIZE))
+            dbg(f'UDS UserSearchLimit={limit}')
+            return limit
+    dbg('UDS userPolicy has no usable UserSearchLimit; using default page size')
+    return UDS_DEFAULT_PAGE_SIZE
 
 
 def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
