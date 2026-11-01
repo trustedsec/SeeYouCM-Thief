@@ -411,3 +411,37 @@ class TestPhoneModelsDispatch:
         with pytest.raises(SystemExit):
             thief.main()
         assert '[DEBUG] Phone models: GET http://10.0.0.1' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Banner: only on --help or an argument error
+# ---------------------------------------------------------------------------
+
+class TestBanner:
+    BANNER_MARK = '___________'
+
+    def test_shown_on_help(self, monkeypatch, capsys):
+        _argv(monkeypatch, '--help')
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert self.BANNER_MARK in out
+        assert 'usage:' in out
+
+    def test_shown_on_argument_error(self, monkeypatch, capsys):
+        _argv(monkeypatch, '--not-a-real-flag')
+        with pytest.raises(SystemExit) as exc:
+            thief.main()
+        assert exc.value.code == 2
+        captured = capsys.readouterr()
+        assert self.BANNER_MARK in captured.out
+        assert 'unrecognized arguments' in captured.err
+
+    def test_not_shown_on_normal_run(self, monkeypatch, tmp_path, capsys):
+        db = tmp_path / 'thief.db'
+        thief.init_database(str(db))
+        _argv(monkeypatch, '--show-db', '--db', str(db))
+        with pytest.raises(SystemExit):
+            thief.main()
+        assert self.BANNER_MARK not in capsys.readouterr().out
