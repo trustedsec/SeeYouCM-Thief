@@ -4324,6 +4324,9 @@ def main():
         quit(0)
     elif phones:
         print_lock = threading.Lock()
+        config_lock = threading.Lock()
+        fallback_names = {}
+        searched_files = set()
 
         def _safe_print(message):
             with print_lock:
@@ -4351,14 +4354,29 @@ def main():
             hostnames = [get_hostname_from_phone(phone)]
             hostnames += get_phones_hostnames_from_reverse(phone) or []
 
-            # Get config files
-            file_names = get_config_names(phone_cucm, hostnames=hostnames, use_tftp=use_tftp)
+            # A missing hostname enumerates every cached config on the CUCM.
+            # Keep that enumeration per run and per CUCM, including empty results.
+            if any(h and h.strip() for h in hostnames):
+                file_names = get_config_names(phone_cucm, hostnames=hostnames, use_tftp=use_tftp)
+            else:
+                cache_key = (phone_cucm, use_tftp)
+                with config_lock:
+                    if cache_key not in fallback_names:
+                        fallback_names[cache_key] = get_config_names(
+                            phone_cucm, hostnames=hostnames, use_tftp=use_tftp)
+                    file_names = fallback_names[cache_key]
             if file_names is None:
                 _safe_print('Unable to detect file names from CUCM for {}'.format(phone))
                 return
 
-            # Search for secrets
+            # Claim files before downloading so parallel phones cannot search
+            # the same CUCM config twice (including shared default files).
             for file in file_names:
+                with config_lock:
+                    file_key = (phone_cucm, file, use_tftp)
+                    if file_key in searched_files:
+                        continue
+                    searched_files.add(file_key)
                 creds, users = search_for_secrets(phone_cucm, file, use_tftp)
                 if creds:
                     local_credentials.extend(creds)
