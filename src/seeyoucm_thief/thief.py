@@ -40,6 +40,10 @@ HTTP_TFTP_PORT = 6970
 # the CUCM major version.
 UDS_PORT = 8443
 UDS_PORT_SECURE = 9443
+# /cucm-uds/users page size. CUCM returns 64 users per page when `max` is
+# omitted; the UserSearchLimit enterprise parameter allows up to 500 (#34).
+UDS_DEFAULT_PAGE_SIZE = 64
+UDS_MAX_PAGE_SIZE = 500
 # Default output file for the standalone --directory harvest
 DEFAULT_DIRECTORY_OUTFILE = 'cucm_directory.csv'
 # Well-known default filenames the CUCM TFTP service hosts in addition to
@@ -763,6 +767,54 @@ def _parse_uds_users_wrapper(body):
     return found
 
 
+# One userPolicy probe per (host, port) per run: --userenum walks /users twice
+# (usernames, then directory records) and the limit does not change mid-run.
+_uds_search_limit_cache = {}
+
+
+def get_uds_search_limit(cucm_host, port=UDS_PORT, timeout=10):
+    """Return the UDS UserSearchLimit: the most users one /users page can hold.
+
+    Cisco documents the enterprise parameter at /cucm-uds/options/userPolicy,
+    readable without credentials, with a range of 1-500 and a default of 64.
+    Any failure returns UDS_DEFAULT_PAGE_SIZE, which is what CUCM uses when
+    `max` is omitted, so a server that does not answer still pages exactly as
+    before (#34). The result (including the default after a failure) is cached
+    per (host, port) for the rest of the run."""
+    if _TEST_MODE:
+        return UDS_DEFAULT_PAGE_SIZE
+    key = (cucm_host, port)
+    if key not in _uds_search_limit_cache:
+        _uds_search_limit_cache[key] = _probe_uds_search_limit(cucm_host, port, timeout)
+    return _uds_search_limit_cache[key]
+
+
+def _probe_uds_search_limit(cucm_host, port, timeout):
+    """Fetch and parse UserSearchLimit; see get_uds_search_limit."""
+    url = f'https://{cucm_host}:{port}/cucm-uds/options/userPolicy'
+    dbg(f'UDS GET {url} (timeout={timeout}s)')
+    try:
+        resp = requests.get(url, verify=False, timeout=timeout)
+    except Exception as e:
+        dbg(f'UDS {url} raised {type(e).__name__}: {e}')
+        return UDS_DEFAULT_PAGE_SIZE
+    if resp.status_code != 200:
+        dbg(f'UDS {url} -> {resp.status_code}; using default page size')
+        return UDS_DEFAULT_PAGE_SIZE
+
+    # Pick the <policy> by its <name>; the wrapper element is undocumented.
+    for block in re.findall(r'<policy\b[^>]*>(.*?)</policy>', resp.text, re.DOTALL):
+        if not re.search(r'<name>\s*UserSearchLimit\s*</name>', block):
+            continue
+        m = re.search(r'<value>\s*(\d+)\s*</value>', block)
+        if m:
+            limit = max(1, min(int(m.group(1)), UDS_MAX_PAGE_SIZE))
+            dbg(f'UDS UserSearchLimit={limit}')
+            return limit
+    dbg('UDS userPolicy has no usable UserSearchLimit; using default page size')
+    return UDS_DEFAULT_PAGE_SIZE
+
+
 def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     """Yield each /cucm-uds/users page's response body text, following UDS
     pagination. Shared by get_users_api and get_user_directory_api so the
@@ -772,8 +824,19 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
     attributes: the next offset is start + returnedCount by construction, which
     avoids having to assume whether UDS indexes from 0 or 1 (it is 0-based). If
     a server omits those attributes, fall back to counting <userName>
-    occurrences and offsetting by the running total."""
-    base = f'https://{cucm_host}:{port}/cucm-uds/users'
+    occurrences and offsetting by the running total.
+
+    The page size comes from get_uds_search_limit() and is sent as `max` only
+    when it exceeds the default, so default-configured servers see the same
+    URLs as before."""
+    plain_base = f'https://{cucm_host}:{port}/cucm-uds/users'
+    page_size = get_uds_search_limit(cucm_host, port, timeout)
+    # Omitting max gets CUCM's default 64, so only send it when it buys a
+    # bigger page (#34). _uds_next_link appends &start= to the max query.
+    if page_size > UDS_DEFAULT_PAGE_SIZE:
+        base = f'{plain_base}?max={page_size}'
+    else:
+        base = plain_base
     seen_urls = set()
     next_url = base
     pages = 0
@@ -796,12 +859,25 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
         dbg(f'UDS {next_url} -> {resp.status_code} ({len(resp.content)} bytes)')
         if resp.status_code != 200:
             dbg(f'UDS non-200 body (first 300 chars): {resp.text[:300]!r}')
-            break
-
-        page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
-        dbg(f'UDS page {pages} parsed {page_count} userName entries')
+            page_count = 0
+        else:
+            page_count = len(re.findall(r'<userName>([^<]+)</userName>', resp.text))
+            dbg(f'UDS page {pages} parsed {page_count} userName entries')
+            if page_count == 0:
+                dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
         if page_count == 0:
-            dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
+            if base != plain_base and collected == 0:
+                # Cisco says max must be "less than" UserSearchLimit; a server
+                # that reads that strictly rejects max=limit, with an error
+                # status or an empty 200. Fall back to the default page size
+                # rather than returning nothing, and say so, since the walk
+                # is now slower (#34).
+                reason = f'HTTP {resp.status_code}' if resp.status_code != 200 else 'empty page'
+                print(f'[!] UDS did not accept max={page_size} ({reason}); '
+                      f'continuing at the default {UDS_DEFAULT_PAGE_SIZE} users per page.')
+                base = plain_base
+                next_url = base
+                continue
             break
 
         wrapper = _parse_uds_users_wrapper(resp.text)
@@ -841,7 +917,8 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
 
     dbg(f'UDS total users collected: {collected} across {pages} page(s)')
     if total is not None and collected < total:
-        print(f'[!] UDS reports {total} total users but only {collected} were retrieved.')
+        print(f'[!] UDS reports {total} matching users but only {collected} were retrieved '
+              f'(totalCount counts matches; the server\'s UserSearchLimit can cap what is retrievable).')
 
 
 def get_users_api(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):

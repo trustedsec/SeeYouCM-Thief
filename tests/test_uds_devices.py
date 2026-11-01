@@ -2,9 +2,19 @@
 import sqlite3
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from seeyoucm_thief import thief
+
+
+@pytest.fixture(autouse=True)
+def _default_uds_page_size(monkeypatch):
+    # These tests serve /users pages by call order; skip the userPolicy probe
+    # so it does not consume a page. Page-size wiring is covered in
+    # tests/test_uds_search_limit.py.
+    monkeypatch.setattr(thief, 'get_uds_search_limit',
+                        lambda *a, **k: thief.UDS_DEFAULT_PAGE_SIZE)
 
 
 def _rows(db_path, sql, params=()):
