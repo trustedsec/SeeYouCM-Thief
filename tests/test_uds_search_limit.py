@@ -73,3 +73,118 @@ class TestGetUdsSearchLimit:
         with patch.object(thief.requests, 'get') as get:
             assert thief.get_uds_search_limit('cucm.example.com', 8443) == thief.UDS_DEFAULT_PAGE_SIZE
         get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _iter_uds_user_pages page-size wiring
+# ---------------------------------------------------------------------------
+
+def _users_page(users, start, total, requested):
+    body = ''.join(f'<user><userName>{u}</userName></user>' for u in users)
+    return (f'<users uri="https://cucm/cucm-uds/users" version="14.0" '
+            f'start="{start}" requestedCount="{requested}" '
+            f'returnedCount="{len(users)}" totalCount="{total}">{body}</users>')
+
+
+def _fake_users_server(directory, page_size, urls):
+    """Serve /users honoring start and max (capped at page_size), like CUCM."""
+    import re
+
+    def side_effect(url, **kwargs):
+        urls.append(url)
+        start_m = re.search(r'[?&]start=(\d+)', url)
+        max_m = re.search(r'[?&]max=(\d+)', url)
+        start = int(start_m.group(1)) if start_m else 0
+        size = min(int(max_m.group(1)), page_size) if max_m else 64
+        window = directory[start:start + size]
+        return _resp(_users_page(window, start, len(directory), size))
+    return side_effect
+
+
+def test_sends_max_on_every_page_when_limit_is_raised(monkeypatch):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 500)
+    directory = [f'user{i:04d}' for i in range(1200)]
+    urls = []
+    with patch.object(thief.requests, 'get',
+                      side_effect=_fake_users_server(directory, 500, urls)):
+        users = thief.get_users_api('cucm.example.com', 8443)
+
+    assert users == directory
+    assert urls == [
+        'https://cucm.example.com:8443/cucm-uds/users?max=500',
+        'https://cucm.example.com:8443/cucm-uds/users?max=500&start=500',
+        'https://cucm.example.com:8443/cucm-uds/users?max=500&start=1000',
+    ]
+
+
+def test_omits_max_when_limit_is_default(monkeypatch):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: thief.UDS_DEFAULT_PAGE_SIZE)
+    directory = [f'user{i:03d}' for i in range(100)]
+    urls = []
+    with patch.object(thief.requests, 'get',
+                      side_effect=_fake_users_server(directory, 64, urls)):
+        users = thief.get_users_api('cucm.example.com', 8443)
+
+    assert users == directory
+    assert urls == [
+        'https://cucm.example.com:8443/cucm-uds/users',
+        'https://cucm.example.com:8443/cucm-uds/users?start=64',
+    ]
+
+
+def test_omits_max_when_limit_is_below_default(monkeypatch):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 10)
+    urls = []
+    with patch.object(thief.requests, 'get',
+                      side_effect=_fake_users_server(['a', 'b'], 10, urls)):
+        thief.get_users_api('cucm.example.com', 8443)
+    assert 'max=' not in urls[0]
+
+
+def test_retries_first_page_without_max_when_server_rejects_it(monkeypatch):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 500)
+    directory = [f'user{i:03d}' for i in range(100)]
+    urls = []
+    serve = _fake_users_server(directory, 64, urls)
+
+    def side_effect(url, **kwargs):
+        if 'max=' in url:
+            urls.append(url)
+            return _resp('<error/>', status=400)
+        return serve(url, **kwargs)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        users = thief.get_users_api('cucm.example.com', 8443)
+
+    assert users == directory
+    assert urls[0] == 'https://cucm.example.com:8443/cucm-uds/users?max=500'
+    assert urls[1] == 'https://cucm.example.com:8443/cucm-uds/users'
+    assert all('max=' not in u for u in urls[1:])
+
+
+def test_pager_probes_limit_with_same_host_port_timeout(monkeypatch):
+    seen = []
+
+    def fake_limit(host, port, timeout):
+        seen.append((host, port, timeout))
+        return thief.UDS_DEFAULT_PAGE_SIZE
+
+    monkeypatch.setattr(thief, 'get_uds_search_limit', fake_limit)
+    with patch.object(thief.requests, 'get',
+                      side_effect=_fake_users_server(['a'], 64, [])):
+        list(thief._iter_uds_user_pages('cucm.example.com', 9443, timeout=7))
+    assert seen == [('cucm.example.com', 9443, 7)]
+
+
+def test_shortfall_warning_explains_user_search_limit(monkeypatch, capsys):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: thief.UDS_DEFAULT_PAGE_SIZE)
+    # Server claims 10 matches but stops after 2 (returnedCount=0 on page 2).
+    page1 = _users_page(['a', 'b'], 0, 10, 64)
+    page2 = _users_page([], 2, 10, 64)
+    responses = [_resp(page1), _resp(page2)]
+    with patch.object(thief.requests, 'get', side_effect=lambda url, **k: responses.pop(0)):
+        thief.get_users_api('cucm.example.com', 8443)
+
+    out = capsys.readouterr().out
+    assert 'UDS reports 10 matching users but only 2 were retrieved' in out
+    assert 'UserSearchLimit' in out
