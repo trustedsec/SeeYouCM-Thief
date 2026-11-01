@@ -862,6 +862,13 @@ def _iter_uds_user_pages(cucm_host, port=UDS_PORT, timeout=10, max_pages=10000):
         dbg(f'UDS page {pages} parsed {page_count} userName entries')
         if page_count == 0:
             dbg(f'UDS empty page body (first 300 chars): {resp.text[:300]!r}')
+            if base != plain_base and collected == 0:
+                # A server may reject max=limit with an empty 200 instead of
+                # an error status; fall back the same way as the non-200 case.
+                dbg(f'UDS returned no users for max={page_size}; retrying without max')
+                base = plain_base
+                next_url = base
+                continue
             break
 
         wrapper = _parse_uds_users_wrapper(resp.text)

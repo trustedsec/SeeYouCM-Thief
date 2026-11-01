@@ -39,9 +39,11 @@ def _policy_body(value):
 
 class TestGetUdsSearchLimit:
     def test_reads_user_search_limit_value(self):
-        with patch.object(thief.requests, 'get', return_value=_resp(_policy_body(500))) as get:
-            assert thief.get_uds_search_limit('cucm.example.com', 8443) == 500
+        with patch.object(thief.requests, 'get', return_value=_resp(_policy_body(200))) as get:
+            assert thief.get_uds_search_limit('cucm.example.com', 8443) == 200
         assert get.call_args[0][0] == 'https://cucm.example.com:8443/cucm-uds/options/userPolicy'
+        assert get.call_args.kwargs['verify'] is False
+        assert get.call_args.kwargs['timeout'] == 10
 
     def test_clamps_above_documented_max(self):
         with patch.object(thief.requests, 'get', return_value=_resp(_policy_body(1000))):
@@ -95,7 +97,7 @@ def _fake_users_server(directory, page_size, urls):
         start_m = re.search(r'[?&]start=(\d+)', url)
         max_m = re.search(r'[?&]max=(\d+)', url)
         start = int(start_m.group(1)) if start_m else 0
-        size = min(int(max_m.group(1)), page_size) if max_m else 64
+        size = min(int(max_m.group(1)), page_size) if max_m else thief.UDS_DEFAULT_PAGE_SIZE
         window = directory[start:start + size]
         return _resp(_users_page(window, start, len(directory), size))
     return side_effect
@@ -151,6 +153,27 @@ def test_retries_first_page_without_max_when_server_rejects_it(monkeypatch):
         if 'max=' in url:
             urls.append(url)
             return _resp('<error/>', status=400)
+        return serve(url, **kwargs)
+
+    with patch.object(thief.requests, 'get', side_effect=side_effect):
+        users = thief.get_users_api('cucm.example.com', 8443)
+
+    assert users == directory
+    assert urls[0] == 'https://cucm.example.com:8443/cucm-uds/users?max=500'
+    assert urls[1] == 'https://cucm.example.com:8443/cucm-uds/users'
+    assert all('max=' not in u for u in urls[1:])
+
+
+def test_retries_first_page_without_max_when_server_returns_empty_200(monkeypatch):
+    monkeypatch.setattr(thief, 'get_uds_search_limit', lambda *a, **k: 500)
+    directory = [f'user{i:03d}' for i in range(100)]
+    urls = []
+    serve = _fake_users_server(directory, thief.UDS_DEFAULT_PAGE_SIZE, urls)
+
+    def side_effect(url, **kwargs):
+        if 'max=' in url:
+            urls.append(url)
+            return _resp(_users_page([], 0, len(directory), 500))
         return serve(url, **kwargs)
 
     with patch.object(thief.requests, 'get', side_effect=side_effect):
